@@ -1,0 +1,18 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Digital Methods Seminar//Calendar//EN
+BEGIN:VEVENT
+UID:20240101T000000Z-digitalmethod@seminar.com
+DTSTAMP:20240101T000000Z
+DTSTART:20241101T140000Z
+DTEND:20241101T153000Z
+SUMMARY:New Frontiers: Digital Methods in Economic History - Giovanni Pala
+LOCATION:Butler Room\, Nuffield College
+DESCRIPTION:First session of a new seminar series on digital methods in economic history. Giovanni Pala will provide an introduction to digital methods and reflections on how to think about digitised sources.\n\nThis workshop is intended for economic and social history students and faculty interested in using newer digital methods in their research (e.g. machine learning\, artificial intelligence)\, and would like to learn or take inspiration from peers at Oxford and beyond.
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Reminder
+TRIGGER:-PT15M
+END:VALARM
+END:VEVENT
+END:VCALENDAR

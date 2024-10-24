@@ -1,0 +1,18 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Bodleian Libraries//iSkills Workshops//EN
+BEGIN:VEVENT
+UID:20231022T140000Z-iskills@bodleian.ox.ac.uk
+DTSTAMP:20231022T140000Z
+DTSTART:20231022T140000Z
+DTEND:20231022T160000Z
+SUMMARY:iSkills: Data sources for research - discovery\, access and use
+LOCATION:Social Science Library
+DESCRIPTION:This workshop will provide a grounding in the different ways quantitative and qualitative data is being made available to benefit researchers. By the end of the session you will also have some insight into how your own future work could add to the process and become part of the research discourse. The course aims to provide an overview of macro and micro data sources available at the University of Oxford\, including national data archives\, subscription services\, business data\, and offers some pointers for further searching.\n\nFormat: Classroom-based (Social Science Library).\n\n*waiting list available*
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Reminder
+TRIGGER:-PT15M
+END:VALARM
+END:VEVENT
+END:VCALENDAR

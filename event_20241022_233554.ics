@@ -1,0 +1,15 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Calendar Event Generator//EN
+BEGIN:VEVENT
+UID:missing-event-details@calendargenerator
+DTSTAMP:20240214T120000Z
+SUMMARY:Error: No Event Details Provided
+DESCRIPTION:Unable to generate calendar event. Please provide event details including at minimum:\n- Event title\n- Start date and time\n- End date and time
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Reminder
+TRIGGER:-PT15M
+END:VALARM
+END:VEVENT
+END:VCALENDAR
