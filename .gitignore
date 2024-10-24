@@ -1,8 +1,8 @@
-* .ics
-* .json
-* .txt
-* .csv
-* .pdf
-* .docx 
+*.ics
+*.json
+*.txt
+*.csv
+*.pdf
+*.docx
 
 .idea/

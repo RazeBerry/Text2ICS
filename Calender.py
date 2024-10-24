@@ -5,12 +5,13 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
                            QProgressBar)
 from PyQt6.QtGui import QKeySequence, QShortcut, QIcon
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 import anthropic
 import time
 from typing import Optional
 import subprocess
 import random
+import threading
 
 
 class CalendarAPIClient:
@@ -117,6 +118,9 @@ If any required information is missing from the event details, use reasonable de
 
 
 class NLCalendarCreator(QMainWindow):
+    # Define a custom signal
+    update_status_signal = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Natural Language Calendar Event")
@@ -308,6 +312,9 @@ class NLCalendarCreator(QMainWindow):
         self.progress_timer.timeout.connect(self._update_progress)
         self.progress_value = 0
 
+        # Connect the signal to the update_status method
+        self.update_status_signal.connect(self.update_status)
+
     def _update_progress(self):
         """Update progress bar animation"""
         self.progress_value = (self.progress_value + 1) % 100
@@ -341,38 +348,43 @@ class NLCalendarCreator(QMainWindow):
         self.progress.show()
         self.progress.setRange(0, 0)  # Infinite progress
         self.progress_timer.start(50)  # Start progress animation
-        
+
+        # Run the API call in a separate thread
+        threading.Thread(target=self._create_event_thread, args=(event_description,)).start()
+
+    def _create_event_thread(self, event_description):
+        """Thread function to handle API call and UI updates"""
         try:
             # Call API with status callback
             ics_content = self.api_client.create_calendar_event(
                 event_description,
-                self.update_status
+                lambda message: self.update_status_signal.emit(message)  # Emit signal
             )
 
             if not ics_content:
                 raise Exception("Failed to get response from API after multiple retries")
 
-            self.update_status("Generating calendar file...")
+            self.update_status_signal.emit("Generating calendar file...")
             
             # Save to file
             filename = f"event_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ics"
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(ics_content)
 
-            self.update_status("Opening calendar application...")
+            self.update_status_signal.emit("Opening calendar application...")
             
             # Open with default calendar app
             subprocess.run(['open', filename])
 
             # Update success status
-            self.update_status("Event created successfully!")
+            self.update_status_signal.emit("Event created successfully!")
 
             # Clear input but DON'T hide the window
             self.text_input.clear()
             
         except Exception as e:
             # Show error in both status label and message box
-            self.update_status("Error: Failed to create event")
+            self.update_status_signal.emit("Error: Failed to create event")
             QMessageBox.critical(self, "Error", str(e))
             
         finally:
@@ -391,4 +403,6 @@ if __name__ == '__main__':
     
     window = NLCalendarCreator()
     window.show()
+    
+    # Start the main event loop
     sys.exit(app.exec())
