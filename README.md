@@ -92,7 +92,7 @@ load_dotenv()
 1. Ensure your environment variable is set and virtual environment is activated
 2. Run the application:
 ```bash
-python main.py
+python calender.py
 ```
 
 ## Usage
