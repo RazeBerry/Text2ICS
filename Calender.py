@@ -20,6 +20,9 @@ from pathlib import Path
 
 class ImageAttachmentArea(QLabel):
     """Custom widget for handling image drag and drop"""
+    # Add a signal to notify when images are added/cleared
+    images_changed = pyqtSignal(bool)  # True when images added, False when cleared
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
@@ -42,7 +45,8 @@ class ImageAttachmentArea(QLabel):
 
     def reset_state(self):
         self.setText("Drag & Drop Images Here")
-        self.image_paths = []
+        self.image_data = []
+        self.images_changed.emit(False)  # Notify that images were cleared
         
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -52,19 +56,37 @@ class ImageAttachmentArea(QLabel):
 
     def dropEvent(self, event: QDropEvent):
         urls = event.mimeData().urls()
-        valid_images = [url.toLocalFile() for url in urls 
-                       if url.toLocalFile().lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))]
+        valid_images = []
+        
+        for url in urls:
+            file_path = url.toLocalFile()
+            if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                max_attempts = 3
+                for attempt in range(max_attempts):
+                    try:
+                        if os.path.exists(file_path):
+                            with open(file_path, 'rb') as f:
+                                image_data = f.read()
+                                mime_type = mimetypes.guess_type(file_path)[0] or 'image/jpeg'
+                                base64_data = base64.b64encode(image_data).decode('utf-8')
+                                valid_images.append((mime_type, base64_data))
+                                break
+                    except Exception:
+                        if attempt == max_attempts - 1:
+                            continue
+                        time.sleep(0.1)
         
         if valid_images:
-            self.image_paths.extend(valid_images)
+            self.image_data.extend(valid_images)
             self.update_preview()
+            self.images_changed.emit(True)  # Notify that images were added
 
     def update_preview(self):
-        if not self.image_paths:
+        if not self.image_data:
             self.reset_state()
             return
             
-        preview_text = f"{len(self.image_paths)} image{'s' if len(self.image_paths) > 1 else ''} attached"
+        preview_text = f"{len(self.image_data)} image{'s' if len(self.image_data) > 1 else ''} attached"
         self.setText(preview_text)
 
 
@@ -75,10 +97,14 @@ class CalendarAPIClient:
         self.base_delay = 1
         self.max_retries = 5
 
-    def create_calendar_event(self, event_description: str, image_paths: list[str],
-                            status_callback: callable) -> Optional[str]:
+    def create_calendar_event(self, event_description: str, image_data: list[tuple[str, str]],
+                         status_callback: callable) -> Optional[str]:
         """
         Create calendar event with enhanced error handling and status updates
+        Args:
+            event_description: Text description of the event
+            image_data: List of tuples containing (mime_type, base64_data)
+            status_callback: Callback for status updates
         Returns: ics_content or None on failure
         """
         # Add these lines at the start of the method
@@ -98,15 +124,15 @@ class CalendarAPIClient:
                         "role": "user",
                         "content": [
                             {"type": "text", "text": f"""You are an AI assistant specialized in creating .ics files for macOS calendar events. Your task is to generate the content of one or more .ics files based on the provided event details. These files will allow users to easily import events into their macOS Calendar application, complete with all necessary information and alarm reminders.\n\nFirst, here are the event details you need to process:\n\n<event_description>\n{event_description}\n</event_description>\n\nToday's date is {day_name}, {formatted_date}. Use this as a reference when processing relative dates (like \"tomorrow\" or \"next week\").\n\nFollow these steps to create the .ics file content:\n\n1. Carefully parse the event details to identify if there are multiple events described. If so, separate them for individual processing.\n\n2. For each event, extract all relevant information such as event title, date, time, location, description, and any other provided details.\n\n3. Generate the .ics file content using the following strict formatting rules:\n\n   REQUIRED CALENDAR STRUCTURE:\n   - BEGIN:VCALENDAR\n   - VERSION:2.0 (mandatory)\n   - PRODID:-//Your identifier//EN (mandatory)\n   \n   REQUIRED EVENT FORMATTING:\n   - BEGIN:VEVENT\n   - UID: Generate unique using format YYYYMMDDTHHMMSSZ-identifier@domain\n   - DTSTAMP: Current time in format YYYYMMDDTHHMMSSZ\n   - DTSTART: Event start in format YYYYMMDDTHHMMSSZ\n   - DTEND: Event end in format YYYYMMDDTHHMMSSZ\n   - SUMMARY: Event title\n   - DESCRIPTION: Properly escaped text using backslash before commas, semicolons, and newlines (\\, \\; \\n)\n   \n   OPTIONAL BUT RECOMMENDED:\n   - LOCATION: Venue details with proper escaping\n   - CATEGORIES: Event type/category\n   \n   REMINDER STRUCTURE:\n   - BEGIN:VALARM\n   - ACTION:DISPLAY\n   - DESCRIPTION:Reminder\n   - TRIGGER:-PT30M (or your preferred timing)\n   - END:VALARM\n   \n   CRITICAL FORMATTING RULES:\n   1. ALL datetime fields MUST include:\n      - T between date and time (e.g., 20241025T130000Z)\n      - Z suffix for UTC timezone\n   2. NO spaces before or after colons\n   3. Line endings must be CRLF (\\\\r\\\\n)\n   4. Proper content escaping:\n      - Commas: text\\, more text\n      - Semicolons: text\\; more text\n      - Newlines: text\\n more text\n   \n   CLOSING STRUCTURE:\n   - END:VEVENT\n   - END:VCALENDAR\n\n4. Ensure all text is properly escaped, replacing any newline characters in the SUMMARY, LOCATION, or DESCRIPTION fields with \"\\n\".\n\n5. Wrap each complete .ics file content in numbered <ics_file_X> tags, where X is the event number (starting from 1).\n\nHere's a detailed breakdown of the .ics file structure:\n\n```\nBEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Your Company//Your Product//EN\nBEGIN:VEVENT\nUID:YYYYMMDDTHHMMSSZ-identifier@domain.com\nDTSTAMP:20241027T120000Z           # Current time, must include T and Z\nDTSTART:20241118T200000Z           # Must include T and Z\nDTEND:20241118T210000Z             # Must include T and Z\nSUMMARY:Event Title\nLOCATION:Location with\\, escaped commas\nDESCRIPTION:Description with\\, escaped commas\\; and semicolons\\nand newlines\nBEGIN:VALARM\nACTION:DISPLAY\nDESCRIPTION:Reminder\nTRIGGER:-PT30M\nEND:VALARM\nEND:VEVENT\nEND:VCALENDAR\n```\n\nIf any required information is missing from the event details, use reasonable defaults or omit the field if it's optional. If you're unable to create a valid .ics file due to insufficient information, explain what details are missing and what the user needs to provide.\n\nRemember to pay special attention to the LOCATION field, as it's particularly important for calendar events.\n\nBefore generating the final output, wrap your thought process in <thinking> tags. Include the following steps:\na. Identify and list each event separately\nb. For each event, extract and list all relevant details (title, date, time, location, description)\nc. Note any missing information and how it will be handled\nd. Outline the structure of the .ics file, including how each piece of information will be formatted\n\nYour final output should only contain the .ics file content(s) wrapped in the appropriate tags, with no additional explanation or commentary."""
-                            },  # Removed extra quote mark after f"""
-                            *[{  # Add any images after the text
+                            },
+                            *[{  # Add images from stored base64 data
                                 "type": "image",
                                 "source": {
                                     "type": "base64",
-                                    "media_type": mimetypes.guess_type(path)[0] or 'image/jpeg',
-                                    "data": base64.b64encode(open(path, 'rb').read()).decode('utf-8')
+                                    "media_type": mime_type,
+                                    "data": base64_data
                                 }
-                            } for path in image_paths]
+                            } for mime_type, base64_data in image_data]
                         ]
                     }])
 
@@ -187,7 +213,7 @@ class NLCalendarCreator(QMainWindow):
         self.status_label.hide()
         
         # Left panel components
-        instruction_label = QLabel("Create a Calendar Event Using Natural Language!!")
+        instruction_label = QLabel("Create a Calendar Event Using Natural Language or Photos!")
         instruction_label.setStyleSheet("""
             QLabel {
                 font-size: 16px;
@@ -199,9 +225,10 @@ class NLCalendarCreator(QMainWindow):
         
         example_label = QLabel(
             "Examples:\n"
-            "• Team standup on Monday at 10am for 30 minutes\n"
-            "• Lunch with Sarah at Cafe Luna next Thursday 12:30pm\n"
-            "• Dentist appointment on March 15th at 2pm"
+            "• Schedule a weekly team sync every Tuesday at 10am until end of quarter\n"
+            "• Dinner reservation at Osteria next Friday at 7:30pm for 2 hours\n"
+            "• Vacation in Hawaii from July 15th to 22nd with flight details in the notes\n"
+            "• Birthday party at Central Park next Saturday 3-6pm, bring snacks and games"
         )
         example_label.setStyleSheet("""
             QLabel {
@@ -430,28 +457,38 @@ class NLCalendarCreator(QMainWindow):
 
     def process_event(self):
         """Process the natural language input and create calendar event"""
-        event_description = self.text_input.toPlainText()
+        event_description = self.text_input.toPlainText().strip()
+        has_images = bool(self.image_area.image_data)
         
-        if not event_description.strip():
-            self.status_label.setText("Please enter an event description")
+        # Case 1: No text AND no images
+        if not event_description and not has_images:
+            QMessageBox.warning(
+                self,
+                "Missing Input",
+                "Please either:\n" +
+                "• Enter an event description, or\n" +
+                "• Attach images, or\n" +
+                "• Both"
+            )
+            self.text_input.setFocus()
             return
-
-        # Use signals to update UI
+        
+        # At this point, we have either text, images, or both - proceed with processing
         self.enable_ui_signal.emit(False)
         self.show_progress_signal.emit(True)
 
-        # Pass image paths to the thread
+        # Pass image data to the thread
         threading.Thread(
             target=self._create_event_thread, 
-            args=(event_description, self.image_area.image_paths.copy())
+            args=(event_description, self.image_area.image_data.copy())
         ).start()
 
-    def _create_event_thread(self, event_description, image_paths):
+    def _create_event_thread(self, event_description, image_data):
         try:
             # Get ICS content from API
             raw_content = self.api_client.create_calendar_event(
                 event_description,
-                image_paths,
+                image_data,
                 lambda message: self.update_status_signal.emit(message)
             )
 
