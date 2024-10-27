@@ -12,6 +12,7 @@ from typing import Optional
 import subprocess
 import random
 import threading
+import re
 
 
 class CalendarAPIClient:
@@ -38,59 +39,12 @@ class CalendarAPIClient:
                 
                 message = self.client.messages.create(
                     model="claude-3-5-sonnet-20241022",
-                    max_tokens=1024,
+                    max_tokens=4096,
                     temperature=0,
                     messages=[{
                         "role": "user",
-                        "content": [{"type": "text", "text": f"""You are a specialized AI assistant tasked with creating .ics files for macOS calendar events. Your job is to generate the content of an .ics file based on the provided event details. This file will allow users to easily import events into their macOS Calendar application, complete with all necessary information and an alarm reminder. Today is {day_name}, {formatted_date}. Please use this as reference when processing relative dates (like "tomorrow" or "next week").
-
-You will be provided with event details in the following variable:
-
-<event_details>
-{event_description}
-</event_details>
-
-Parse the event details carefully to extract all relevant information such as event title, date, time, location, description, and any other provided details.
-
-To create the .ics file content, follow these steps:
-
-1. Begin the file with the following lines:
-   BEGIN:VCALENDAR
-   VERSION:2.0
-   PRODID:-//Your Company//Your Product//EN
-
-2. Start the event with:
-   BEGIN:VEVENT
-
-3. Add the following fields, filling them out based on the provided event details:
-   - UID: Generate a unique identifier (e.g., a UUID)
-   - DTSTAMP: Current timestamp in the format YYYYMMDDTHHMMSSZ
-   - DTSTART: Event start date and time in the format YYYYMMDDTHHMMSS
-   - DTEND: Event end date and time in the format YYYYMMDDTHHMMSS
-   - SUMMARY: Event title
-   - LOCATION: Event location (if provided), Pay this field special attention.
-   - DESCRIPTION: Event description (if provided)
-
-4. Create an alarm for the event:
-   BEGIN:VALARM
-   ACTION:DISPLAY
-   DESCRIPTION:Reminder
-   TRIGGER:-PT30M
-   END:VALARM
-
-   This sets a reminder 30 minutes before the event. Adjust the TRIGGER value if a different reminder time is specified in the event details.
-
-5. End the event and calendar sections:
-   END:VEVENT
-   END:VCALENDAR
-
-6. Ensure all text is properly escaped. Replace any newline characters in the SUMMARY, LOCATION, or DESCRIPTION fields with "\n".
-
-Present your final .ics file content within <ics_file> tags. Make sure to maintain proper indentation and formatting for readability. 
-
-7. You only ouput the ICS FILE and nothing else. 
-
-If any required information is missing from the event details, use reasonable defaults or omit the field if it's optional. If you're unable to create a valid .ics file due to insufficient information, explain what details are missing and what the user needs to provide."""}]
+                        "content": [{"type": "text", "text": f"""
+"You are an AI assistant specialized in creating .ics files for macOS calendar events. Your task is to generate the content of one or more .ics files based on the provided event details. These files will allow users to easily import events into their macOS Calendar application, complete with all necessary information and alarm reminders.\n\nFirst, here are the event details you need to process:\n\n{event_description}\n{{event_description}}\n</event_description>\n\nToday's date is {day_name}, {formatted_date}. Use this as a reference when processing relative dates (like \"tomorrow\" or \"next week\").\n\nFollow these steps to create the .ics file content:\n\n1. Carefully parse the event details to identify if there are multiple events described. If so, separate them for individual processing.\n\n2. For each event, extract all relevant information such as event title, date, time, location, description, and any other provided details.\n\n3. Generate the .ics file content using the following structure:\n   - Begin with the VCALENDAR header\n   - Create a VEVENT section with all necessary fields\n   - Add a VALARM section for the reminder\n   - End with the appropriate closing tags\n\n4. Ensure all text is properly escaped, replacing any newline characters in the SUMMARY, LOCATION, or DESCRIPTION fields with \"\\n\".\n\n5. Wrap each complete .ics file content in numbered <ics_file_X> tags, where X is the event number (starting from 1).\n\nHere's a detailed breakdown of the .ics file structure:\n\n```\nBEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Your Company//Your Product//EN\nBEGIN:VEVENT\nUID:[Generate a unique identifier (e.g., a UUID)]\nDTSTAMP:[Current timestamp in YYYYMMDDTHHMMSSZ format]\nDTSTART:[Event start date and time in YYYYMMDDTHHMMSS format]\nDTEND:[Event end date and time in YYYYMMDDTHHMMSS format]\nSUMMARY:[Event title]\nLOCATION:[Event location (if provided)]\nDESCRIPTION:[Event description (if provided)]\nBEGIN:VALARM\nACTION:DISPLAY\nDESCRIPTION:Reminder\nTRIGGER:-PT30M\nEND:VALARM\nEND:VEVENT\nEND:VCALENDAR\n```\n\nIf any required information is missing from the event details, use reasonable defaults or omit the field if it's optional. If you're unable to create a valid .ics file due to insufficient information, explain what details are missing and what the user needs to provide.\n\nRemember to pay special attention to the LOCATION field, as it's particularly important for calendar events.\n\nBefore generating the final output, wrap your thought process in <thinking> tags. Include the following steps:\na. Identify and list each event separately\nb. For each event, extract and list all relevant details (title, date, time, location, description)\nc. Note any missing information and how it will be handled\nd. Outline the structure of the .ics file, including how each piece of information will be formatted\n\nYour final output should only contain the .ics file content(s) wrapped in the appropriate tags, with no additional explanation or commentary."""}]
                     }])
 
                 return message.content[0].text if isinstance(message.content, list) else message.content
@@ -358,42 +312,55 @@ class NLCalendarCreator(QMainWindow):
         threading.Thread(target=self._create_event_thread, args=(event_description,)).start()
 
     def _create_event_thread(self, event_description):
-        """Thread function to handle API call and UI updates"""
         try:
-            # Call API with status callback
-            ics_content = self.api_client.create_calendar_event(
+            # Get ICS content from API
+            raw_content = self.api_client.create_calendar_event(
                 event_description,
-                lambda message: self.update_status_signal.emit(message)  # Emit signal
+                lambda message: self.update_status_signal.emit(message)
             )
 
-            if not ics_content:
+            if not raw_content:
                 raise Exception("Failed to get response from API after multiple retries")
 
-            self.update_status_signal.emit("Generating calendar file...")
-            
-            # Save to file
-            filename = f"event_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ics"
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(ics_content)
+            # Extract individual ICS files using regex
+            ics_files = re.findall(r'<ics_file_\d+>(.*?)</ics_file_\d+>', 
+                                  raw_content, re.DOTALL)
 
-            self.update_status_signal.emit("Opening calendar application...")
-            
-            # Open with default calendar app
-            subprocess.run(['open', filename])
+            if not ics_files:
+                # Fallback for single event (no tags)
+                ics_files = [raw_content]
 
-            # Update success status
-            self.update_status_signal.emit("Event created successfully!")
+            self.update_status_signal.emit(f"Processing {len(ics_files)} events...")
 
-            # Use signals for UI updates
+            # Process each ICS file
+            for idx, ics_content in enumerate(ics_files, 1):
+                # Clean up the content (remove any extra whitespace/newlines)
+                ics_content = ics_content.strip()
+                
+                # Generate unique filename for each event
+                filename = f"event_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx}.ics"
+                
+                # Save to file
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write(ics_content)
+                
+                # Open with default calendar app
+                subprocess.run(['open', filename])
+                
+                self.update_status_signal.emit(f"Processed event {idx}/{len(ics_files)}")
+
+            # Final success message
+            event_text = "events" if len(ics_files) > 1 else "event"
+            self.update_status_signal.emit(f"Successfully created {len(ics_files)} {event_text}!")
+
+            # Clear input and update UI
             self.clear_input_signal.emit()
             
         except Exception as e:
-            self.update_status_signal.emit("Error: Failed to create event")
-            # Use QMetaObject.invokeMethod to show message box from main thread
+            self.update_status_signal.emit("Error: Failed to create event(s)")
             QMetaObject.invokeMethod(self, "_show_error",
                                    Qt.ConnectionType.QueuedConnection,
                                    Q_ARG(str, str(e)))
-            
         finally:
             self.enable_ui_signal.emit(True)
             self.show_progress_signal.emit(False)
