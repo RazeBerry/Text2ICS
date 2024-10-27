@@ -24,8 +24,8 @@ A PyQt6-based desktop application that lets you create calendar events using nat
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/RazeBerry/Calender2ICS
-cd Calender2ICS
+git clone https://github.com/RazeBerry/Text2ICS
+cd Text2ICS
 ```
 
 2. Create and activate a virtual environment (recommended):
