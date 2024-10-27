@@ -312,7 +312,7 @@ class NLCalendarCreator(QMainWindow):
         left_layout.addWidget(self.create_button)
         
         # Right panel components
-        image_label = QLabel("Event Attachments")
+        image_label = QLabel("Photo Attachments of Events")
         image_label.setStyleSheet("""
             QLabel {
                 font-size: 16px;

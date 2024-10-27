@@ -1,11 +1,12 @@
 # Natural Language Calendar Creator
 
-A PyQt6-based desktop application that lets you create calendar events using natural language. Simply describe your event(s) in plain English, and the app will generate and add them to your calendar automatically. Supports creating multiple events in a single entry!
+A PyQt6-based desktop application that lets you create calendar events using natural language and photos! Simply describe your event(s) in plain English or drag & drop event photos/flyers, and the app will generate and add them to your calendar automatically. Supports creating multiple events in a single entry!
 
 ## Features
 
 - Natural language event creation
-- **Multi-event processing** - Create multiple events in a single description
+- **Photo-to-Calendar Integration** - Drag & drop event flyers or photos to create events
+- **Multi-event processing** - Create multiple events from text or images in a single description
 - Modern dark mode UI
 - Global keyboard shortcut (Ctrl+Shift+E)
 - Automatic calendar integration
@@ -99,15 +100,27 @@ python calender.py
 ## Usage
 
 1. Launch the application using the command above or the global shortcut (Ctrl+Shift+E)
-2. Type your event description(s) in natural language. You can create multiple events in a single entry! For example:
+
+2. Create events in two ways:
+
+   ### Text Input
+   Type your event description(s) in natural language. You can create multiple events in a single entry! For example:
    - Single event: "Team standup on Monday at 10am for 30 minutes"
    - Single event: "Lunch with Sarah at Cafe Luna next Thursday 12:30pm"
    - Multiple events: "Daily standup meetings Monday through Friday at 9:30am for 30 minutes"
    - Multiple events: "Yoga classes every Tuesday and Thursday at 6pm for the next 4 weeks"
    - Multiple events: "Doctor appointment on March 15th at 2pm and follow-up visit on March 29th same time"
+
+   ### Photo Input
+   - Simply drag & drop event flyers, screenshots, or photos into the attachment area
+   - Supports multiple image formats (.png, .jpg, .jpeg, .gif)
+   - The app will analyze the images and extract event details automatically
+   - Perfect for conference schedules, event posters, or meeting invitations
+   - Combine with text input for additional details or modifications
+
 3. Click "Create Event" or press Enter
 4. The event(s) will be created and opened in your default calendar application
-5. For multiple events, you'll see a status indicator showing how many events are being processed
+5. For multiple events or images, you'll see a status indicator showing progress
 
 ## Troubleshooting
 
@@ -130,6 +143,7 @@ python calender.py
 - Ensure PyQt6 is properly installed
 - Check for any system-specific UI scaling issues
 - Verify you have the required icon file or remove the icon setting line
+- For image drag & drop issues, ensure proper file permissions and supported formats
 
 ## Contributing
 
