@@ -1,10 +1,11 @@
 # Natural Language Calendar Creator
 
-A PyQt6-based desktop application that lets you create calendar events using natural language. Simply describe your event in plain English, and the app will generate and add it to your calendar automatically.
+A PyQt6-based desktop application that lets you create calendar events using natural language. Simply describe your event(s) in plain English, and the app will generate and add them to your calendar automatically. Supports creating multiple events in a single entry!
 
 ## Features
 
 - Natural language event creation
+- **Multi-event processing** - Create multiple events in a single description
 - Modern dark mode UI
 - Global keyboard shortcut (Ctrl+Shift+E)
 - Automatic calendar integration
@@ -98,12 +99,15 @@ python calender.py
 ## Usage
 
 1. Launch the application using the command above or the global shortcut (Ctrl+Shift+E)
-2. Type your event description in natural language, for example:
-   - "Team standup on Monday at 10am for 30 minutes"
-   - "Lunch with Sarah at Cafe Luna next Thursday 12:30pm"
-   - "Dentist appointment on March 15th at 2pm"
+2. Type your event description(s) in natural language. You can create multiple events in a single entry! For example:
+   - Single event: "Team standup on Monday at 10am for 30 minutes"
+   - Single event: "Lunch with Sarah at Cafe Luna next Thursday 12:30pm"
+   - Multiple events: "Daily standup meetings Monday through Friday at 9:30am for 30 minutes"
+   - Multiple events: "Yoga classes every Tuesday and Thursday at 6pm for the next 4 weeks"
+   - Multiple events: "Doctor appointment on March 15th at 2pm and follow-up visit on March 29th same time"
 3. Click "Create Event" or press Enter
-4. The event will be created and opened in your default calendar application
+4. The event(s) will be created and opened in your default calendar application
+5. For multiple events, you'll see a status indicator showing how many events are being processed
 
 ## Troubleshooting
 
@@ -119,6 +123,7 @@ python calender.py
 ### Calendar Integration
 - Ensure you have default calendar application set up
 - Check file permissions in the directory where .ics files are being created
+- For multiple events, each event will open separately in your calendar application
 - Verify your system can handle the `open` command (macOS) or equivalent
 
 ### UI Issues
