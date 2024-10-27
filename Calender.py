@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
                            QProgressBar)
 from PyQt6.QtGui import QKeySequence, QShortcut, QIcon
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject
 import anthropic
 import time
 from typing import Optional
@@ -120,7 +120,11 @@ If any required information is missing from the event details, use reasonable de
 class NLCalendarCreator(QMainWindow):
     # Define a custom signal
     update_status_signal = pyqtSignal(str)
-
+    # Add new signals for UI updates
+    enable_ui_signal = pyqtSignal(bool)
+    clear_input_signal = pyqtSignal()
+    show_progress_signal = pyqtSignal(bool)
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Natural Language Calendar Event")
@@ -314,6 +318,10 @@ class NLCalendarCreator(QMainWindow):
 
         # Connect the signal to the update_status method
         self.update_status_signal.connect(self.update_status)
+        # Connect new signals
+        self.enable_ui_signal.connect(self._enable_ui)
+        self.clear_input_signal.connect(self._clear_input)
+        self.show_progress_signal.connect(self._show_progress)
 
     def _update_progress(self):
         """Update progress bar animation"""
@@ -342,12 +350,9 @@ class NLCalendarCreator(QMainWindow):
             self.status_label.setText("Please enter an event description")
             return
 
-        # Disable input and show progress
-        self.text_input.setEnabled(False)
-        self.create_button.setEnabled(False)
-        self.progress.show()
-        self.progress.setRange(0, 0)  # Infinite progress
-        self.progress_timer.start(50)  # Start progress animation
+        # Use signals to update UI
+        self.enable_ui_signal.emit(False)
+        self.show_progress_signal.emit(True)
 
         # Run the API call in a separate thread
         threading.Thread(target=self._create_event_thread, args=(event_description,)).start()
@@ -379,20 +384,42 @@ class NLCalendarCreator(QMainWindow):
             # Update success status
             self.update_status_signal.emit("Event created successfully!")
 
-            # Clear input but DON'T hide the window
-            self.text_input.clear()
+            # Use signals for UI updates
+            self.clear_input_signal.emit()
             
         except Exception as e:
-            # Show error in both status label and message box
             self.update_status_signal.emit("Error: Failed to create event")
-            QMessageBox.critical(self, "Error", str(e))
+            # Use QMetaObject.invokeMethod to show message box from main thread
+            QMetaObject.invokeMethod(self, "_show_error",
+                                   Qt.ConnectionType.QueuedConnection,
+                                   Q_ARG(str, str(e)))
             
         finally:
-            # Reset UI state
-            self.text_input.setEnabled(True)
-            self.create_button.setEnabled(True)
+            self.enable_ui_signal.emit(True)
+            self.show_progress_signal.emit(False)
+
+    def _enable_ui(self, enabled: bool):
+        """Enable or disable UI elements"""
+        self.text_input.setEnabled(enabled)
+        self.create_button.setEnabled(enabled)
+
+    def _clear_input(self):
+        """Clear the text input"""
+        self.text_input.clear()
+
+    def _show_progress(self, show: bool):
+        """Show or hide progress bar"""
+        if show:
+            self.progress.show()
+            self.progress.setRange(0, 0)
+            self.progress_timer.start(50)
+        else:
             self.progress.hide()
             self.progress_timer.stop()
+
+    def _show_error(self, message: str):
+        """Show error message box (called from main thread)"""
+        QMessageBox.critical(self, "Error", message)
 
 
 if __name__ == '__main__':
