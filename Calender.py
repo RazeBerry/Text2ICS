@@ -86,8 +86,36 @@ class ImageAttachmentArea(QLabel):
             self.reset_state()
             return
             
-        preview_text = f"{len(self.image_data)} image{'s' if len(self.image_data) > 1 else ''} attached"
-        self.setText(preview_text)
+        # Create a more engaging preview message
+        count = len(self.image_data)
+        if count == 1:
+            preview_text = "✨ 1 image ready to process!"
+        else:
+            preview_text = f"🎉 {count} images ready to go!"
+            
+        # Add a helpful secondary message
+        secondary_text = "\n\nClick 'Create Event' to process"
+        
+        # Combine messages and set label
+        self.setText(f"{preview_text}{secondary_text}")
+        
+        # Update styling to make it more noticeable
+        self.setStyleSheet("""
+            QLabel {
+                border: 2px dashed #0A84FF;  /* Change border to blue */
+                border-radius: 8px;
+                padding: 12px;
+                background-color: rgba(10, 132, 255, 0.1);  /* Light blue background */
+                color: #FFFFFF;  /* Brighter text */
+                font-weight: bold;  /* Make text bold */
+                font-size: 14px;  /* Slightly larger font */
+                line-height: 1.4;
+            }
+            QLabel:hover {
+                border-color: #0A84FF;
+                background-color: rgba(10, 132, 255, 0.15);
+            }
+        """)
 
 
 class CalendarAPIClient:
@@ -598,7 +626,7 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     
     # Set the application-wide icon
-    app.setWindowIcon(QIcon("/Users/sihao/Downloads/icons8-calender-85.png"))
+    app.setWindowIcon(QIcon("calendar-svg.png"))
     
     window = NLCalendarCreator()
     window.show()
