@@ -626,7 +626,7 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     
     # Set the application-wide icon
-    app.setWindowIcon(QIcon("calendar-svg.png"))
+    app.setWindowIcon(QIcon("calendar-svg-simple.png"))
     
     window = NLCalendarCreator()
     window.show()
