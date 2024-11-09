@@ -513,6 +513,9 @@ class NLCalendarCreator(QMainWindow):
 
     def _create_event_thread(self, event_description, image_data):
         try:
+            # Get the directory where Calender.py is located
+            script_dir = Path(__file__).parent.absolute()
+            
             # Get ICS content from API
             raw_content = self.api_client.create_calendar_event(
                 event_description,
@@ -538,15 +541,15 @@ class NLCalendarCreator(QMainWindow):
                 # Clean up the content (remove any extra whitespace/newlines)
                 ics_content = ics_content.strip()
                 
-                # Generate unique filename for each event
-                filename = f"event_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx}.ics"
+                # Generate unique filename for each event, now with correct path
+                filename = script_dir / f"event_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx}.ics"
                 
                 # Save to file
                 with open(filename, 'w', encoding='utf-8') as f:
                     f.write(ics_content)
                 
-                # Open with default calendar app
-                subprocess.run(['open', filename])
+                # Open with default calendar app (convert Path to string)
+                subprocess.run(['open', str(filename)])
                 
                 self.update_status_signal.emit(f"Processed event {idx}/{len(ics_files)}")
 
