@@ -674,7 +674,7 @@ class NLCalendarCreator(QMainWindow):
         """)
 
         # Initialize API client
-        api_key = "AIzaSyBxu5F7F88QuZs45TfVpyMR4hWWA2fXjR0"
+        api_key = ""
         if not api_key:
             raise RuntimeError("Missing environment variable MY_API_KEY")
         self.api_client = CalendarAPIClient(api_key=api_key)
