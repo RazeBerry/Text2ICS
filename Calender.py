@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
                            QProgressBar, QHBoxLayout)
 from PyQt6.QtGui import QKeySequence, QShortcut, QIcon, QDragEnterEvent, QDropEvent, QPixmap
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject, QPropertyAnimation, QEasingCurve, QMimeData
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject, QPropertyAnimation, QEasingCurve, QMimeData, QBuffer
 import google.generativeai as genai
 import time
 from typing import Optional
@@ -16,6 +16,7 @@ import re
 import base64
 import mimetypes
 from pathlib import Path
+import tempfile
 
 
 class ImageAttachmentArea(QLabel):
@@ -58,16 +59,16 @@ class ImageAttachmentArea(QLabel):
         """
         Robust drop event handler that first attempts to extract in-memory image data.
         It falls back to processing file URLs if in-memory data is not available.
+        This version creates temporary copies of the images to ensure the file exists later.
         """
         mime = event.mimeData()
         valid_images = []
 
-        # First, try to get image data directly from the MIME data (in-memory drag)
+        # In-memory image data handling
         if mime.hasImage():
-            image_data = mime.imageData()
-            # Ensure we have a QImage instance; if not, try converting to QPixmap directly.
             try:
                 from PyQt6.QtGui import QImage, QPixmap
+                image_data = mime.imageData()
                 if isinstance(image_data, QImage):
                     pixmap = QPixmap.fromImage(image_data)
                 else:
@@ -79,24 +80,36 @@ class ImageAttachmentArea(QLabel):
                     pixmap.save(buffer, "PNG")
                     bdata = buffer.data()
                     base64_data = base64.b64encode(bytes(bdata)).decode("utf-8")
-                    valid_images.append(("dragged_image", "image/png", base64_data))
+                    # Create a temporary file to store the image data.
+                    temp_fd, temp_path = tempfile.mkstemp(suffix=".png")
+                    with os.fdopen(temp_fd, 'wb') as f:
+                        f.write(bytes(bdata))
+                    valid_images.append((temp_path, "image/png", base64_data))
                     buffer.close()
             except Exception as e:
                 print("Error processing in-memory image:", e)
 
-        # Fallback: if no in-memory image is found, or if additional files were dropped,
-        # process URLs.
+        # Fallback: process dropped file URLs.
         if mime.hasUrls():
-            urls = mime.urls()
-            for url in urls:
+            for url in mime.urls():
                 file_path = url.toLocalFile()
+                # Only process supported image types.
                 if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
                     try:
+                        # Check if the file still exists.
+                        if not os.path.exists(file_path):
+                            print(f"Warning: file '{file_path}' does not exist. Skipping.")
+                            continue
                         with open(file_path, 'rb') as f:
                             image_raw = f.read()
-                            mime_type = mimetypes.guess_type(file_path)[0] or 'image/jpeg'
-                            base64_data = base64.b64encode(image_raw).decode("utf-8")
-                            valid_images.append((file_path, mime_type, base64_data))
+                        mime_type = mimetypes.guess_type(file_path)[0] or 'image/jpeg'
+                        base64_data = base64.b64encode(image_raw).decode("utf-8")
+                        # Write the image data to a temporary file.
+                        ext = os.path.splitext(file_path)[1] if os.path.splitext(file_path)[1] else ".jpg"
+                        temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
+                        with os.fdopen(temp_fd, 'wb') as tmp:
+                            tmp.write(image_raw)
+                        valid_images.append((temp_path, mime_type, base64_data))
                     except Exception as e:
                         print(f"Error reading file '{file_path}':", e)
 
@@ -338,9 +351,9 @@ VERSION:2.0
 PRODID:-//Your Company//Your Product//EN
 BEGIN:VEVENT
 UID:YYYYMMDDTHHMMSSZ-identifier@domain.com
-DTSTAMP:20241027T120000Z           # Current time, must include T and Z
-DTSTART:20241118T200000Z           # Must include T and Z
-DTEND:20241118T210000Z             # Must include T and Z
+DTSTAMP:20250207T120000Z           # Current time, must include T and Z
+DTSTART:20250207T200000Z           # Must include T and Z
+DTEND:20250207T210000Z             # Must include T and Z
 SUMMARY:Event Title
 LOCATION:Location with\\, escaped commas
 DESCRIPTION:Description with\\, escaped commas\\; and semicolons\\nand newlines
@@ -661,7 +674,7 @@ class NLCalendarCreator(QMainWindow):
         """)
 
         # Initialize API client
-        api_key = os.environ.get("MY_API_KEY")
+        api_key = "AIzaSyBxu5F7F88QuZs45TfVpyMR4hWWA2fXjR0"
         if not api_key:
             raise RuntimeError("Missing environment variable MY_API_KEY")
         self.api_client = CalendarAPIClient(api_key=api_key)
