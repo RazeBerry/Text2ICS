@@ -17,6 +17,7 @@ import base64
 import mimetypes
 from pathlib import Path
 import tempfile
+from string import Formatter
 
 
 class ImageAttachmentArea(QLabel):
@@ -156,34 +157,13 @@ class ImageAttachmentArea(QLabel):
 
 
 class CalendarAPIClient:
-    """Separated API logic while using Gemini API as service provider for calendar event creation."""
-    def __init__(self, api_key: str):
-        genai.configure(api_key=api_key)
-        self.generation_config = {
-            "temperature": 0,
-            "top_p": 0.3,
-            "top_k": 64,
-            "max_output_tokens": 8192,
-            "response_mime_type": "text/plain",
-        }
-        self.model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash-lite-preview-02-05",
-            generation_config=self.generation_config,
-            system_instruction="""You are an AI assistant specialized in creating .ics files for macOS calendar events. Your task is to generate the content of one or more .ics files based on the provided event details. These files will allow users to easily import events into their macOS Calendar application, complete with all necessary information and alarm reminders.
-
-First, here are the event details you need to process:
-
-<event_description>
-{event_description}
-</event_description>
-
-Today's date is {day_name}, {formatted_date}. Use this as a reference when processing relative dates (like "tomorrow" or "next week").
-
+    # Class-level constant for SYSTEM instructions
+    SYSTEM_PROMPT = """
 Follow these steps to create the .ics file content:
 
 1. Carefully parse the event details to identify if there are multiple events described. If so, separate them for individual processing.
 
-2. For each event, extract all relevant information such as event title, date, time, location, description, and any other provided details.
+2. For each event, extract all relevant information such as event title, date, time, location, description, and any other provided details. If the event involves flights between different cities, be aware that the departure and arrival times may be in different time zones. Adjust the event times accordingly by converting them to UTC, ensuring accurate reflection of time differences. Employ a chain-of-thought process with reflection and verification to ensure proper handling of these time differences.
 
 3. Generate the .ics file content using the following strict formatting rules:
    REQUIRED CALENDAR STRUCTURE:
@@ -212,46 +192,98 @@ Follow these steps to create the .ics file content:
    - END:VALARM
    
    CRITICAL FORMATTING RULES:
-   1. ALL datetime fields MUST include:
-      - T between date and time (e.g., 20241025T130000Z)
-      - Z suffix for UTC timezone
-   2. NO spaces before or after colons
-   3. Line endings must be CRLF (\r\n)
-   4. Proper content escaping:
-      - Commas: text\, more text
-      - Semicolons: text\; more text
-      - Newlines: text\n more text
-   
-   CLOSING STRUCTURE:
-   - END:VEVENT
-   - END:VCALENDAR
+   1. DATETIME FIELD REQUIREMENTS (STRICTLY ENFORCED):
+      - MANDATORY 'T' separator between date and time components
+      - Format must be: YYYYMMDD'T'HHMMSS'Z'
+      - Examples of CORRECT format:
+        * 20241025T130000Z  ✓ (correct with T separator)
+        * 20250101T090000Z  ✓ (correct with T separator)
+      - Examples of INCORRECT format:
+        * 20241025130000Z   ✗ (missing T separator)
+        * 2024-10-25T13:00:00Z  ✗ (contains hyphens and colons)
+        * 20241025 130000Z  ✗ (contains space instead of T)
+      - The 'Z' suffix is required for UTC timezone
+      - This format is REQUIRED for ALL datetime fields:
+        * DTSTART
+        * DTEND
+        * DTSTAMP
+        * UID (when using timestamp)
+
+   2. EXAMPLE OF CORRECT FORMATTING:
+      ```ics
+      BEGIN:VCALENDAR
+      VERSION:2.0
+      PRODID:-//Example Corp//Calendar App//EN
+      BEGIN:VEVENT
+      UID:20240325T123000Z-flight123@example.com
+      DTSTAMP:20240325T123000Z
+      DTSTART:20240401T090000Z
+      DTEND:20240401T100000Z
+      SUMMARY:Flight BA123
+      DESCRIPTION:British Airways | Economy\\nDeparture: T2\\nArrival: T5
+      END:VEVENT
+      END:VCALENDAR
+      ```
+
+   3. VALIDATION REQUIREMENTS:
+      - Every datetime field MUST include the T separator
+      - No exceptions are allowed for any datetime fields
+      - Calendar applications will reject files without proper T separators
+      - Always validate before creating the ICS file
 
 4. Ensure all text is properly escaped, replacing any newline characters in the SUMMARY, LOCATION, or DESCRIPTION fields with "\\n".
 5. Wrap each complete .ics file content in numbered <ics_file_X> tags, where X is the event number (starting from 1).
 
 Here's a detailed breakdown of the .ics file structure:
 
-```
-BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Your Company//Your Product//EN
-BEGIN:VEVENT
-UID:YYYYMMDDTHHMMSSZ-identifier@domain.com
-DTSTAMP:20241027T120000Z           # Current time, must include T and Z
-DTSTART:20241118T200000Z           # Must include T and Z
-DTEND:20241118T210000Z             # Must include T and Z
-SUMMARY:Event Title
-LOCATION:Location with\\, escaped commas
-DESCRIPTION:Description with\\, escaped commas\\; and semicolons\\nand newlines
-BEGIN:VALARM
-ACTION:DISPLAY
-DESCRIPTION:Reminder
-TRIGGER:-PT30M
-END:VALARM
-END:VEVENT
+BEGIN:VCALENDAR\r\n
+VERSION:2.0\r\n
+PRODID:-//Your Company//Your Product//EN\r\n
+BEGIN:VEVENT\r\n
+UID:YYYYMMDDTHHMMSSZ-identifier@domain.com\r\n
+DTSTAMP:20250207T120000Z           # Current time, must include T and Z\r\n
+DTSTART:20250207T200000Z           # Must include T and Z\r\n
+DTEND:20250207T210000Z             # Must include T and Z\r\n
+SUMMARY:Event Title\r\n
+LOCATION:Location with\\, escaped commas\r\n
+DESCRIPTION:Description with\\, escaped commas\\; and semicolons\\nand newlines\r\n
+BEGIN:VALARM\r\n
+ACTION:DISPLAY\r\n
+DESCRIPTION:Reminder\r\n
+TRIGGER:-PT30M\r\n
+END:VALARM\r\n
+END:VEVENT\r\n
 END:VCALENDAR
-```
 """
+
+    # Class-level template for USER prompts (with dynamic placeholders)
+    USER_PROMPT_TEMPLATE = """
+<event_description>
+{event_description}
+</event_description>
+
+Today's date is {day_name}, {formatted_date}.
+"""
+
+    def __init__(self, api_key: str):
+        genai.configure(api_key=api_key)
+        self.generation_config = {
+            "temperature": 0,
+            "top_p": 0.3,
+            "top_k": 64,
+            "max_output_tokens": 8192,
+            "response_mime_type": "text/plain",
+        }
+
+        # Validation layer: Ensure USER_PROMPT_TEMPLATE contains the required keys.
+        template_keys = [fn for _, fn, _, _ in Formatter().parse(self.USER_PROMPT_TEMPLATE) if fn]
+        required_keys = {'event_description', 'day_name', 'formatted_date'}
+        assert set(template_keys) == required_keys, f"Template mismatch! Expected keys {required_keys} but got {set(template_keys)}"
+
+        self.model = genai.GenerativeModel(
+            model_name="gemini-2.0-flash",
+            generation_config=self.generation_config,
+            system_instruction=self.SYSTEM_PROMPT
         )
         self.base_delay = 1
         self.max_retries = 5
@@ -269,137 +301,54 @@ END:VCALENDAR
                               status_callback: callable) -> Optional[str]:
         """
         Create calendar event with enhanced error handling and status updates.
-        Modified to support both text and image attachments.
-        Args:
-            event_description: Text description of the event.
-            image_data: List of tuples containing (file_path, mime_type, base64_data).
-                        (Note: Updated dropEvent should store the file_path in addition to the original data.)
-            status_callback: Callback for status updates.
-        Returns: ics_content or None on failure.
+        This method supports both text and image attachments.
         """
-        print("DEBUG: create_calendar_event called with event_description length:", len(event_description),
-              "and", len(image_data), "images")
+        # If no text is provided but there are attached images, use a default description.
+        if not event_description and image_data:
+            event_description = "Event details are provided via attached images."
+
         current_date = datetime.now()
         day_name = current_date.strftime("%A")
         formatted_date = current_date.strftime("%B %d, %Y")
-        
-        # Build the API prompt as before:
-        api_prompt = f"""You are an AI assistant specialized in creating .ics files for macOS calendar events. Your task is to generate the content of one or more .ics files based on the provided event details. These files will allow users to easily import events into their macOS Calendar application, complete with all necessary information and alarm reminders.
 
-First, here are the event details you need to process:
+        # Build the dynamic prompt using the class-level USER_PROMPT_TEMPLATE.
+        api_prompt = self.USER_PROMPT_TEMPLATE.format(
+            event_description=event_description,
+            day_name=day_name,
+            formatted_date=formatted_date
+        )
 
-<event_description>
-{event_description}
-</event_description>
-
-Today's date is {day_name}, {formatted_date}. Use this as a reference when processing relative dates (like "tomorrow" or "next week").
-
-Follow these steps to create the .ics file content:
-
-1. Carefully parse the event details to identify if there are multiple events described. If so, separate them for individual processing.
-
-2. For each event, extract all relevant information such as event title, date, time, location, description, and any other provided details.
-
-3. Generate the .ics file content using the following strict formatting rules:
-   REQUIRED CALENDAR STRUCTURE:
-   - BEGIN:VCALENDAR
-   - VERSION:2.0 (mandatory)
-   - PRODID:-//Your identifier//EN (mandatory)
-   
-   REQUIRED EVENT FORMATTING:
-   - BEGIN:VEVENT
-   - UID: Generate unique using format YYYYMMDDTHHMMSSZ-identifier@domain
-   - DTSTAMP: Current time in format YYYYMMDDTHHMMSSZ
-   - DTSTART: Event start in format YYYYMMDDTHHMMSSZ
-   - DTEND: Event end in format YYYYMMDDTHHMMSSZ
-   - SUMMARY: Event title
-   - DESCRIPTION: Properly escaped text using backslash before commas, semicolons, and newlines (\, \; \n)
-   
-   OPTIONAL BUT RECOMMENDED:
-   - LOCATION: Venue details with proper escaping
-   - CATEGORIES: Event type/category
-   
-   REMINDER STRUCTURE:
-   - BEGIN:VALARM
-   - ACTION:DISPLAY
-   - DESCRIPTION:Reminder
-   - TRIGGER:-PT30M (or your preferred timing)
-   - END:VALARM
-   
-   CRITICAL FORMATTING RULES:
-   1. ALL datetime fields MUST include:
-      - T between date and time (e.g., 20241025T130000Z)
-      - Z suffix for UTC timezone
-   2. NO spaces before or after colons
-   3. Line endings must be CRLF (\r\n)
-   4. Proper content escaping:
-      - Commas: text\, more text
-      - Semicolons: text\; more text
-      - Newlines: text\n more text
-   
-   CLOSING STRUCTURE:
-   - END:VEVENT
-   - END:VCALENDAR
-
-4. Ensure all text is properly escaped, replacing any newline characters in the SUMMARY, LOCATION, or DESCRIPTION fields with "\\n".
-5. Wrap each complete .ics file content in numbered <ics_file_X> tags, where X is the event number (starting from 1).
-
-Here's a detailed breakdown of the .ics file structure:
-
-BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Your Company//Your Product//EN
-BEGIN:VEVENT
-UID:YYYYMMDDTHHMMSSZ-identifier@domain.com
-DTSTAMP:20250207T120000Z           # Current time, must include T and Z
-DTSTART:20250207T200000Z           # Must include T and Z
-DTEND:20250207T210000Z             # Must include T and Z
-SUMMARY:Event Title
-LOCATION:Location with\\, escaped commas
-DESCRIPTION:Description with\\, escaped commas\\; and semicolons\\nand newlines
-BEGIN:VALARM
-ACTION:DISPLAY
-DESCRIPTION:Reminder
-TRIGGER:-PT30M
-END:VALARM
-END:VEVENT
-END:VCALENDAR
-"""
-        
         for attempt in range(self.max_retries):
             try:
                 status_callback(f"Attempting to create event... (Try {attempt + 1}/{self.max_retries})")
                 print(f"DEBUG: Attempt {attempt + 1}/{self.max_retries}")
                 print("DEBUG: Generated API prompt (first 200 chars):", api_prompt[:200])
-                
-                # Prepare chat history:
+
+                # Prepare chat history (add any uploaded image parts if images are provided)
                 history = []
                 if image_data:
-                    # Upload each image and accumulate the resulting file objects.
                     image_parts = []
                     for img in image_data:
-                        # Unpack assuming each tuple is (file_path, mime_type, base64_data)
+                        # Unpack tuple: (file_path, mime_type, base64_data)
                         file_path, mime_type, _ = img  
                         uploaded_file = self.upload_to_gemini(file_path, mime_type=mime_type)
                         image_parts.append(uploaded_file)
-                    # Attach the images in the initial history message.
                     history.append({
                         "role": "user",
                         "parts": image_parts
                     })
-                
-                # Start the chat session with the image history (if available).
+
+                # Start the chat session with the provided image history (if any)
                 chat_session = self.model.start_chat(history=history)
-                # Send the text prompt as a follow-up message.
+                # Send the text prompt as the follow-up message.
                 message = chat_session.send_message(api_prompt)
                 
-                # Instead of checking for a non-existent GenerativeContent type,
-                # use getattr() to extract the text attribute if it exists.
+                # Try to obtain the text response.
                 response_text = getattr(message, 'text', None)
                 if response_text is None:
                     response_text = str(message)
                 
-                print("DEBUG: API Response (first 200 chars):", response_text[:200])
+                print("DEBUG: API Response:", response_text)
                 print("DEBUG: API call successful on attempt", attempt + 1)
                 return response_text
 
@@ -413,7 +362,7 @@ END:VCALENDAR
                     continue
                 print("DEBUG: Max retries reached. Raising exception.")
                 raise
-                
+
         print("DEBUG: Failed to create calendar event after retries.")
         return None
 
@@ -433,11 +382,7 @@ class NLCalendarCreator(QMainWindow):
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        
-        # Main horizontal layout with equal spacing
-        main_layout = QHBoxLayout(central_widget)
-        main_layout.setSpacing(20)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout = QHBoxLayout()  # <-- no parent provided here
         
         # Force equal width for both panels
         left_panel = QWidget()
@@ -674,9 +619,9 @@ class NLCalendarCreator(QMainWindow):
         """)
 
         # Initialize API client
-        api_key = ""
+        api_key = os.environ.get('GEMINI_API_KEY')
         if not api_key:
-            raise RuntimeError("Missing environment variable MY_API_KEY")
+            raise RuntimeError("Missing environment variable gemini_api_key")
         self.api_client = CalendarAPIClient(api_key=api_key)
 
         # Keyboard shortcut
@@ -744,10 +689,10 @@ class NLCalendarCreator(QMainWindow):
 
     def _create_event_thread(self, event_description, image_data):
         try:
-            # Get the directory where Calender.py is located
+            # Get the directory where Calender.py is located.
             script_dir = Path(__file__).parent.absolute()
             
-            # Get ICS content from API
+            # Get ICS content from API.
             raw_content = self.api_client.create_calendar_event(
                 event_description,
                 image_data,
@@ -757,47 +702,46 @@ class NLCalendarCreator(QMainWindow):
             if not raw_content:
                 raise Exception("Failed to get response from API after multiple retries")
 
-            # Extract individual ICS files using regex
-            ics_files = re.findall(r'<ics_file_\d+>(.*?)</ics_file_\d+>', 
-                                  raw_content, re.DOTALL)
+            # Imitate catching the "<ics_file_X>" mechanism:
+            # Look for content enclosed in <ics_file_1>, <ics_file_2>, etc.
+            ics_files = re.findall(r'<ics_file_\d+>(.*?)</ics_file_\d+>', raw_content, re.DOTALL)
 
+            # If the wrapped tags aren't present, assume the entire response is a single valid ICS event.
             if not ics_files:
-                # Fallback for single event (no tags)
-                ics_files = [raw_content]
+                ics_files = [raw_content.strip()]
 
-            self.update_status_signal.emit(f"Processing {len(ics_files)} events...")
+            self.update_status_signal.emit(f"Processing {len(ics_files)} event(s)...")
 
-            # Process each ICS file
+            # Process each ICS file.
             for idx, ics_content in enumerate(ics_files, 1):
-                # Clean up the content (remove any extra whitespace/newlines)
+                # Clean up the content.
                 ics_content = ics_content.strip()
-                
-                # Generate unique filename for each event, now with correct path
+
+                # Generate a unique filename for each event.
                 filename = script_dir / f"event_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx}.ics"
                 
-                # Save to file
+                # Save the ICS content to a file.
                 with open(filename, 'w', encoding='utf-8') as f:
                     f.write(ics_content)
                 
-                # Open with default calendar app (convert Path to string)
+                # Open the file with the default calendar application.
                 subprocess.run(['open', str(filename)])
                 
                 self.update_status_signal.emit(f"Processed event {idx}/{len(ics_files)}")
 
-            # Final success message
             event_text = "events" if len(ics_files) > 1 else "event"
             self.update_status_signal.emit(f"Successfully created {len(ics_files)} {event_text}!")
 
-            # Clear input and update UI
+            # Clear the text input and update the UI.
             self.clear_input_signal.emit()
-            
+
         except Exception as e:
             self.update_status_signal.emit("Error: Failed to create event(s)")
             QTimer.singleShot(0, self._show_error, Qt.ConnectionType.QueuedConnection, Q_ARG(str, str(e)))
         finally:
             self.enable_ui_signal.emit(True)
             self.show_progress_signal.emit(False)
-            # Clear attachments after successful creation
+            # Clear attachments after processing.
             self.clear_attachments()
 
     def _enable_ui(self, enabled: bool):
@@ -865,4 +809,3 @@ if __name__ == '__main__':
     
     # Start the main event loop
     sys.exit(app.exec())
-
