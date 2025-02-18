@@ -58,14 +58,14 @@ class ImageAttachmentArea(QLabel):
 
     def dropEvent(self, event: QDropEvent):
         """
-        Robust drop event handler that first attempts to extract in-memory image data.
-        It falls back to processing file URLs if in-memory data is not available.
-        This version creates temporary copies of the images to ensure the file exists later.
+        Robust drop event handler that processes both in-memory images and file URLs.
+        It deduplicates images if the same image is provided via both methods.
         """
         mime = event.mimeData()
         valid_images = []
+        seen_base64 = set()
 
-        # In-memory image data handling
+        # Process in-memory image data first.
         if mime.hasImage():
             try:
                 from PyQt6.QtGui import QImage, QPixmap
@@ -81,6 +81,8 @@ class ImageAttachmentArea(QLabel):
                     pixmap.save(buffer, "PNG")
                     bdata = buffer.data()
                     base64_data = base64.b64encode(bytes(bdata)).decode("utf-8")
+                    # Record the processed data to avoid duplicates.
+                    seen_base64.add(base64_data)
                     # Create a temporary file to store the image data.
                     temp_fd, temp_path = tempfile.mkstemp(suffix=".png")
                     with os.fdopen(temp_fd, 'wb') as f:
@@ -90,7 +92,7 @@ class ImageAttachmentArea(QLabel):
             except Exception as e:
                 print("Error processing in-memory image:", e)
 
-        # Fallback: process dropped file URLs.
+        # Process dropped file URLs and deduplicate if already added.
         if mime.hasUrls():
             for url in mime.urls():
                 file_path = url.toLocalFile()
@@ -105,6 +107,10 @@ class ImageAttachmentArea(QLabel):
                             image_raw = f.read()
                         mime_type = mimetypes.guess_type(file_path)[0] or 'image/jpeg'
                         base64_data = base64.b64encode(image_raw).decode("utf-8")
+                        # If this image has already been added via in-memory data, skip it.
+                        if base64_data in seen_base64:
+                            continue
+                        seen_base64.add(base64_data)
                         # Write the image data to a temporary file.
                         ext = os.path.splitext(file_path)[1] if os.path.splitext(file_path)[1] else ".jpg"
                         temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
