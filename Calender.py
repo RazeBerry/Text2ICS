@@ -4,12 +4,10 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
                            QProgressBar, QHBoxLayout)
-from PyQt6.QtGui import QKeySequence, QShortcut, QIcon, QDragEnterEvent, QDropEvent, QPixmap
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject, QPropertyAnimation, QEasingCurve, QMimeData, QBuffer
-import google.generativeai as genai
+from PyQt6.QtGui import QKeySequence, QShortcut, QIcon, QDragEnterEvent, QDropEvent, QPixmap, QPainter, QBrush, QColor
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject, QEasingCurve, QMimeData, QBuffer
 import time
 from typing import Optional
-import subprocess
 import random
 import threading
 import re
@@ -19,6 +17,9 @@ from pathlib import Path
 import tempfile
 from string import Formatter
 
+# Add at the top of file
+os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"  # Proper HiDPI support
+os.environ["QT_API"] = "pyqt6"  # Explicitly request PyQt6
 
 class ImageAttachmentArea(QLabel):
     """Custom widget for handling image drag and drop"""
@@ -130,6 +131,9 @@ class ImageAttachmentArea(QLabel):
             self.reset_state()
             return
             
+        # Update alignment flag usage
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
         # Create a more engaging preview message
         count = len(self.image_data)
         if count == 1:
@@ -272,7 +276,13 @@ Today's date is {day_name}, {formatted_date}.
 """
 
     def __init__(self, api_key: str):
-        genai.configure(api_key=api_key)
+        # Import genai here for lazy loading and store as instance variable
+        import google.generativeai as genai
+        self.genai = genai
+        
+        # Configure the API key
+        self.genai.configure(api_key=api_key)
+        
         self.generation_config = {
             "temperature": 0,
             "top_p": 0.3,
@@ -286,7 +296,7 @@ Today's date is {day_name}, {formatted_date}.
         required_keys = {'event_description', 'day_name', 'formatted_date'}
         assert set(template_keys) == required_keys, f"Template mismatch! Expected keys {required_keys} but got {set(template_keys)}"
 
-        self.model = genai.GenerativeModel(
+        self.model = self.genai.GenerativeModel(
             model_name="gemini-2.0-flash",
             generation_config=self.generation_config,
             system_instruction=self.SYSTEM_PROMPT
@@ -295,11 +305,8 @@ Today's date is {day_name}, {formatted_date}.
         self.max_retries = 5
 
     def upload_to_gemini(self, path, mime_type=None):
-        """Uploads the given file to Gemini.
-        
-        See https://ai.google.dev/gemini-api/docs/prompting_with_media
-        """
-        file = genai.upload_file(path, mime_type=mime_type)
+        """Uploads the given file to Gemini."""
+        file = self.genai.upload_file(path, mime_type=mime_type)
         print(f"Uploaded file '{file.display_name}' as: {file.uri}")
         return file
 
@@ -373,6 +380,61 @@ Today's date is {day_name}, {formatted_date}.
         return None
 
 
+class PulsingLoadingIndicator(QWidget):
+    """Custom animated loading indicator with pulsing dots"""
+    
+    def __init__(self, parent=None, dot_count=3):
+        super().__init__(parent)
+        self.setFixedSize(60, 20)  # Small footprint
+        
+        self.dot_count = dot_count
+        self.animation_offset = 0
+        self.dot_size = 6
+        self.dot_spacing = 10
+        self.animation_speed = 150  # ms
+        
+        self.animation_timer = QTimer(self)
+        self.animation_timer.timeout.connect(self.update_animation)
+        
+        # Set widget background to transparent
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+    def start_animation(self):
+        self.animation_timer.start(self.animation_speed)
+        
+    def stop_animation(self):
+        self.animation_timer.stop()
+        
+    def update_animation(self):
+        self.animation_offset = (self.animation_offset + 1) % self.dot_count
+        self.update()  # Trigger repaint
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Calculate total width of all dots
+        total_width = self.dot_count * self.dot_size + (self.dot_count - 1) * self.dot_spacing
+        
+        # Center the dots horizontally
+        start_x = (self.width() - total_width) // 2
+        center_y = self.height() // 2
+        
+        # Draw each dot
+        for i in range(self.dot_count):
+            # Calculate opacity based on animation offset
+            opacity = 0.3 + 0.7 * (1.0 - (abs(self.animation_offset - i) % self.dot_count) / self.dot_count)
+            
+            # Set the dot color with proper opacity
+            color = QColor(255, 255, 255, int(opacity * 255))
+            painter.setBrush(QBrush(color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            
+            # Draw the dot
+            x = start_x + i * (self.dot_size + self.dot_spacing)
+            painter.drawEllipse(x, center_y - self.dot_size // 2, self.dot_size, self.dot_size)
+
+
 class NLCalendarCreator(QMainWindow):
     # Define a custom signal
     update_status_signal = pyqtSignal(str)
@@ -386,9 +448,14 @@ class NLCalendarCreator(QMainWindow):
         self.setWindowTitle("Natural Language Calendar Event")
         self.setFixedSize(1000, 500)  # Slightly larger window for better proportions
 
+        # Remove problematic WA_DontShowOnScreen attribute
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background-color: #1E1E1E;")
+        
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout()  # <-- no parent provided here
+        # Fix parent widget for main layout
+        main_layout = QHBoxLayout(central_widget)
         
         # Force equal width for both panels
         left_panel = QWidget()
@@ -544,7 +611,6 @@ class NLCalendarCreator(QMainWindow):
                 font-size: 12px;
                 border-radius: 6px;
                 max-width: 150px;
-                align-self: center;
             }
             QPushButton:hover {
                 background-color: #FF453A;
@@ -555,7 +621,7 @@ class NLCalendarCreator(QMainWindow):
         # Add components to right panel
         right_layout.addWidget(image_label, 0)
         right_layout.addWidget(self.image_area, 1)  # 1 = stretch to fill space
-        right_layout.addWidget(self.clear_attachments_btn, 0)
+        right_layout.addWidget(self.clear_attachments_btn, 0, Qt.AlignmentFlag.AlignCenter)
         
         # Main horizontal layout
         main_layout.addWidget(left_panel)
@@ -570,81 +636,80 @@ class NLCalendarCreator(QMainWindow):
         central_widget.setLayout(final_layout)
 
         # Initialize progress animation
-        self.progress_animation = QPropertyAnimation(self.progress, b"value")
-        self.progress_animation.setDuration(2000)  # 2 seconds per cycle
-        self.progress_animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
-
-        # Previous styling remains the same
-        self.setStyleSheet("""
-            QWidget {
-                font-family: 'Arial', 'Arial', sans-serif;
-                font-size: 13px;
-                color: #FFFFFF;
-                background-color: #1E1E1E;
-            }
-            QLabel {
-                font-size: 13px;
-                color: #FFFFFF;
-                background: transparent;
-            }
-            QTextEdit {
-                color: #FFFFFF;
-                background-color: #2D2D2D;
-                border: 1px solid #3F3F3F;
-                border-radius: 8px;
-                padding: 12px;
-                margin: 8px 0;
-                line-height: 1.4;
-            }
-            QTextEdit:focus {
-                border: 1px solid #0A84FF;
-                background-color: #363636;
-            }
-            QPushButton {
-                background-color: #0A84FF;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background-color: #0071E3;
-            }
-            QPushButton:pressed {
-                background-color: #006CDC;
-            }
-            QProgressBar {
-                border: none;
-                background: #2D2D2D;
-                height: 2px;
-            }
-            QProgressBar::chunk {
-                background-color: #0A84FF;
-            }
-        """)
-
-        # Initialize API client
-        api_key = os.environ.get('GEMINI_API_KEY')
-        if not api_key:
-            raise RuntimeError("Missing environment variable gemini_api_key")
-        self.api_client = CalendarAPIClient(api_key=api_key)
-
-        # Keyboard shortcut
-        self.shortcut = QShortcut(QKeySequence("Ctrl+Shift+E"), self)
-        self.shortcut.activated.connect(self.show_window)
-
-        # Progress animation
-        self.progress_timer = QTimer()
-        self.progress_timer.timeout.connect(self._update_progress)
+        self.progress_animation = None
         self.progress_value = 0
 
-        # Connect the signal to the update_status method
+        # Add critical style rules back
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #1E1E1E;
+                border: 1px solid #3F3F3F;
+                border-radius: 12px;
+            }
+            ImageAttachmentArea {
+                min-height: 350px;
+            }
+            QTextEdit {
+                margin: 8px 0;
+            }
+        """)
+        
+        # Defer UI refresh
+        QTimer.singleShot(100, self.refresh_ui)
+
+        # Initialize api_client as None
+        self.api_client = None
+
+        # Add overlay widget for processing state
+        self.overlay = QWidget(self)
+        self.overlay.setStyleSheet("""
+            QWidget {
+                background-color: rgba(30, 30, 30, 0.85);
+                border-radius: 12px;
+            }
+        """)
+        self.overlay.hide()
+
+        # Create layout for overlay content
+        overlay_layout = QVBoxLayout(self.overlay)
+        overlay_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Add processing label
+        self.processing_label = QLabel("Processing Request...")
+        self.processing_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 20px 35px;
+                background-color: rgba(10, 132, 255, 0.15);
+                border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                min-width: 250px;
+                max-width: 400px;
+            }
+        """)
+        self.processing_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        overlay_layout.addWidget(self.processing_label)
+        
+        # Add animated loading indicator
+        self.loading_indicator = PulsingLoadingIndicator(self.overlay)
+        overlay_layout.addWidget(self.loading_indicator, 0, Qt.AlignmentFlag.AlignCenter)
+        overlay_layout.setSpacing(15)  # Add space between label and indicator
+        
+        # Connect signals to slots
         self.update_status_signal.connect(self.update_status)
-        # Connect new signals
         self.enable_ui_signal.connect(self._enable_ui)
         self.clear_input_signal.connect(self._clear_input)
         self.show_progress_signal.connect(self._show_progress)
+
+        # Make sure the overlay covers the entire window
+        self.overlay.resize(self.size())
+
+    def refresh_ui(self):
+        """Trigger full UI update after initial layout"""
+        self.updateGeometry()
+        self.repaint()
 
     def _update_progress(self):
         """Update progress bar animation"""
@@ -652,12 +717,25 @@ class NLCalendarCreator(QMainWindow):
         self.progress.setValue(self.progress_value)
 
     def update_status(self, message: str):
-        """Update status label and process events"""
+        """Update status label and processing label with animation"""
         if message:
             self.status_label.setText(message)
             self.status_label.show()
+            
+            # Update the processing label with the current status
+            # Add an animated ellipsis effect if the message indicates waiting
+            waiting_indicators = ["processing", "creating", "generating", "waiting", "preparing"]
+            
+            if any(indicator in message.lower() for indicator in waiting_indicators):
+                # The loading indicator will show animation, so keep text clean
+                self.processing_label.setText(message)
+            else:
+                # For completion messages, no need for ellipsis
+                self.processing_label.setText(message)
         else:
             self.status_label.hide()
+        
+        # Force immediate UI update
         QApplication.processEvents()
 
     def show_window(self):
@@ -667,6 +745,13 @@ class NLCalendarCreator(QMainWindow):
 
     def process_event(self):
         """Process the natural language input and create calendar event"""
+        # Initialize API client on first use
+        if not self.api_client:
+            api_key = os.environ.get('GEMINI_API_KEY')
+            if not api_key:
+                raise RuntimeError("Missing environment variable gemini_api_key")
+            self.api_client = CalendarAPIClient(api_key=api_key)
+
         event_description = self.text_input.toPlainText().strip()
         has_images = bool(self.image_area.image_data)
         
@@ -695,6 +780,9 @@ class NLCalendarCreator(QMainWindow):
 
     def _create_event_thread(self, event_description, image_data):
         try:
+            # Lazy load subprocess
+            import subprocess
+            
             # Get the directory where Calender.py is located.
             script_dir = Path(__file__).parent.absolute()
             
@@ -751,9 +839,21 @@ class NLCalendarCreator(QMainWindow):
             self.clear_attachments()
 
     def _enable_ui(self, enabled: bool):
-        """Enable or disable UI elements"""
+        """Enable or disable UI elements with overlay"""
         self.text_input.setEnabled(enabled)
         self.create_button.setEnabled(enabled)
+        self.image_area.setEnabled(enabled)
+        
+        if enabled:
+            self.overlay.hide()
+            self.loading_indicator.stop_animation()
+            self.processing_label.setText("Processing Request...")
+        else:
+            # Show overlay with blur effect
+            self.overlay.show()
+            
+            # Start the loading animation
+            self.loading_indicator.start_animation()
 
     def _clear_input(self):
         """Clear the text input"""
@@ -772,20 +872,20 @@ class NLCalendarCreator(QMainWindow):
 
     def _animate_progress(self):
         """Create smooth indeterminate progress animation"""
-        # Reset to start if needed
+        # Lazy load QPropertyAnimation
+        from PyQt6.QtCore import QPropertyAnimation
+        
         current_value = self.progress.value()
         if current_value >= 100:
             self.progress.setValue(0)
             current_value = 0
 
-        # Configure animation
+        self.progress_animation = QPropertyAnimation(self.progress, b"value")
+        self.progress_animation.setDuration(2000)
+        self.progress_animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
         self.progress_animation.setStartValue(current_value)
         self.progress_animation.setEndValue(100)
-        
-        # Connect finished signal to restart animation
         self.progress_animation.finished.connect(self._restart_progress_animation)
-        
-        # Start animation
         self.progress_animation.start()
 
     def _restart_progress_animation(self):
@@ -802,6 +902,11 @@ class NLCalendarCreator(QMainWindow):
         """Clear all attached images"""
         self.image_area.reset_state()
         self.clear_attachments_btn.hide()
+
+    def resizeEvent(self, event):
+        """Handle resize events to keep overlay properly sized"""
+        super().resizeEvent(event)
+        self.overlay.resize(self.size())
 
 
 if __name__ == '__main__':
