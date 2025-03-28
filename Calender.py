@@ -56,18 +56,55 @@ class ImageAttachmentArea(QLabel):
             urls = event.mimeData().urls()
             if all(url.toLocalFile().lower().endswith(('.png', '.jpg', '.jpeg', '.gif')) for url in urls):
                 event.acceptProposedAction()
+        elif event.mimeData().hasImage():
+            event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent):
         """
-        Robust drop event handler that processes both in-memory images and file URLs.
-        It deduplicates images if the same image is provided via both methods.
+        Processes dropped images, prioritizing file URLs over in-memory image data
+        to prevent duplicate processing of the same image.
         """
         mime = event.mimeData()
         valid_images = []
         seen_base64 = set()
+        urls_processed = False  # Flag to track if URLs were successfully handled
 
-        # Process in-memory image data first.
-        if mime.hasImage():
+        # --- PRIORITIZE FILE URLS ---
+        if mime.hasUrls():
+            for url in mime.urls():
+                file_path = url.toLocalFile()
+                # Only process supported image types
+                if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                    try:
+                        # Check if the file still exists
+                        if not os.path.exists(file_path):
+                            print(f"Warning: file '{file_path}' does not exist. Skipping.")
+                            continue
+                        
+                        with open(file_path, 'rb') as f:
+                            image_raw = f.read()
+                        mime_type = mimetypes.guess_type(file_path)[0] or 'image/jpeg'
+                        base64_data = base64.b64encode(image_raw).decode("utf-8")
+                        
+                        # Still check for duplicates among multiple dropped files
+                        if base64_data in seen_base64:
+                            continue
+                        
+                        seen_base64.add(base64_data)
+                        
+                        # Create a temporary file with the original extension
+                        ext = os.path.splitext(file_path)[1] if os.path.splitext(file_path)[1] else ".jpg"
+                        temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
+                        with os.fdopen(temp_fd, 'wb') as tmp:
+                            tmp.write(image_raw)
+                        
+                        valid_images.append((temp_path, mime_type, base64_data))
+                        urls_processed = True  # Mark that we processed at least one URL
+                    except Exception as e:
+                        print(f"Error reading file '{file_path}':", e)
+
+        # --- PROCESS IN-MEMORY IMAGE ONLY IF NO URLs WERE PROCESSED ---
+        if not urls_processed and mime.hasImage():
             try:
                 from PyQt6.QtGui import QImage, QPixmap
                 image_data = mime.imageData()
@@ -75,16 +112,16 @@ class ImageAttachmentArea(QLabel):
                     pixmap = QPixmap.fromImage(image_data)
                 else:
                     pixmap = QPixmap(image_data)
+                    
                 if not pixmap.isNull():
-                    # Save the pixmap to an in-memory buffer as PNG.
+                    # Save the pixmap to an in-memory buffer as PNG
                     buffer = QBuffer()
                     buffer.open(QBuffer.OpenModeFlag.WriteOnly)
                     pixmap.save(buffer, "PNG")
                     bdata = buffer.data()
                     base64_data = base64.b64encode(bytes(bdata)).decode("utf-8")
-                    # Record the processed data to avoid duplicates.
-                    seen_base64.add(base64_data)
-                    # Create a temporary file to store the image data.
+                    
+                    # Create a temporary file to store the image data
                     temp_fd, temp_path = tempfile.mkstemp(suffix=".png")
                     with os.fdopen(temp_fd, 'wb') as f:
                         f.write(bytes(bdata))
@@ -93,34 +130,7 @@ class ImageAttachmentArea(QLabel):
             except Exception as e:
                 print("Error processing in-memory image:", e)
 
-        # Process dropped file URLs and deduplicate if already added.
-        if mime.hasUrls():
-            for url in mime.urls():
-                file_path = url.toLocalFile()
-                # Only process supported image types.
-                if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-                    try:
-                        # Check if the file still exists.
-                        if not os.path.exists(file_path):
-                            print(f"Warning: file '{file_path}' does not exist. Skipping.")
-                            continue
-                        with open(file_path, 'rb') as f:
-                            image_raw = f.read()
-                        mime_type = mimetypes.guess_type(file_path)[0] or 'image/jpeg'
-                        base64_data = base64.b64encode(image_raw).decode("utf-8")
-                        # If this image has already been added via in-memory data, skip it.
-                        if base64_data in seen_base64:
-                            continue
-                        seen_base64.add(base64_data)
-                        # Write the image data to a temporary file.
-                        ext = os.path.splitext(file_path)[1] if os.path.splitext(file_path)[1] else ".jpg"
-                        temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
-                        with os.fdopen(temp_fd, 'wb') as tmp:
-                            tmp.write(image_raw)
-                        valid_images.append((temp_path, mime_type, base64_data))
-                    except Exception as e:
-                        print(f"Error reading file '{file_path}':", e)
-
+        # Update UI if any images were successfully added
         if valid_images:
             self.image_data.extend(valid_images)
             self.update_preview()
