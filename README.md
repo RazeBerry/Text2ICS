@@ -7,25 +7,25 @@ A PyQt6-based desktop application that lets you create calendar events using nat
 - Natural language event creation
 - **Photo-to-Calendar Integration** - Drag & drop event flyers or photos to create events
 - **Multi-event processing** - Create multiple events from text or images in a single description
-- Modern dark mode UI
-- Global keyboard shortcut (Ctrl+Shift+E)
+- Modern UI with light mode
 - Automatic calendar integration
 - Rate limiting and retry handling
 - Progress indicators and status updates
+- Modular code architecture with separation of concerns
 
 ## Requirements
 
 - Python 3.8 or higher
 - PyQt6
-- Anthropic API key
+- Google Generative AI (Gemini) API key
 - macOS (calendar integration currently optimized for macOS)
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/RazeBerry/Text2ICS
-cd Text2ICS
+git clone https://github.com/username/EventCalenderGenerator
+cd EventCalenderGenerator
 ```
 
 2. Create and activate a virtual environment (recommended):
@@ -41,19 +41,19 @@ python -m venv venv
 
 3. Install required packages:
 ```bash
-pip install PyQt6 anthropic
+pip install PyQt6 google-generativeai
 ```
 
-## Setting Up the Anthropic API Key
+## Setting Up the Gemini API Key
 
-The application requires an Anthropic API key to function. You can set it up in several ways:
+The application requires a Google Gemini API key to function. You can set it up in several ways:
 
 ### Option 1: Environment Variable (Recommended)
 
 #### macOS/Linux:
 ```bash
 # Add to ~/.bashrc, ~/.zshrc, or equivalent
-export ANTHROPIC_API_KEY='your-api-key-here'
+export GEMINI_API_KEY='your-api-key-here'
 ```
 Then restart your terminal or run:
 ```bash
@@ -62,20 +62,20 @@ source ~/.bashrc  # or ~/.zshrc
 
 #### Windows (Command Prompt):
 ```cmd
-setx ANTHROPIC_API_KEY "your-api-key-here"
+setx GEMINI_API_KEY "your-api-key-here"
 ```
 Then restart your command prompt.
 
 #### Windows (PowerShell):
 ```powershell
-[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "your-api-key-here", "User")
+[Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "your-api-key-here", "User")
 ```
 Then restart PowerShell.
 
 ### Option 2: .env File
 Create a `.env` file in the project root:
 ```
-ANTHROPIC_API_KEY=your-api-key-here
+GEMINI_API_KEY=your-api-key-here
 ```
 
 Then install and use python-dotenv:
@@ -94,12 +94,30 @@ load_dotenv()
 1. Ensure your environment variable is set and virtual environment is activated
 2. Run the application:
 ```bash
-python calender.py
+python Calender.py
 ```
+
+## Testing the API Client
+
+To verify that the API client works correctly:
+
+```bash
+python test_api_client.py
+```
+
+This will test the basic functionality of the API client with a simple example.
+
+## Project Structure
+
+The project is organized as follows:
+
+- `Calender.py` - Main application with UI components and event handling
+- `api_client.py` - Separated API interaction module for better modularity
+- `test_api_client.py` - Testing script for the API client
 
 ## Usage
 
-1. Launch the application using the command above or the global shortcut (Ctrl+Shift+E)
+1. Launch the application using the command above
 
 2. Create events in two ways:
 
@@ -118,7 +136,7 @@ python calender.py
    - Perfect for conference schedules, event posters, or meeting invitations
    - Combine with text input for additional details or modifications
 
-3. Click "Create Event" or press Enter
+3. Click "Create Event" 
 4. The event(s) will be created and opened in your default calendar application
 5. For multiple events or images, you'll see a status indicator showing progress
 
@@ -128,7 +146,7 @@ python calender.py
 - Verify your API key is correctly set by printing the environment variable:
   ```python
   import os
-  print(os.getenv("ANTHROPIC_API_KEY"))
+  print(os.getenv("GEMINI_API_KEY"))
   ```
 - Ensure there are no extra spaces or quotes in your API key
 - Try restarting your terminal/IDE after setting the environment variable
