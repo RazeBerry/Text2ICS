@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
-                           QProgressBar, QHBoxLayout)
+                           QProgressBar, QHBoxLayout, QSizePolicy)
 from PyQt6.QtGui import QKeySequence, QShortcut, QIcon, QDragEnterEvent, QDropEvent, QPixmap, QPainter, QBrush, QColor
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject, QEasingCurve, QMimeData, QBuffer
 import time
@@ -15,11 +15,26 @@ import base64
 import mimetypes
 from pathlib import Path
 import tempfile
+import subprocess
 from string import Formatter
+
+# Import the CalendarAPIClient from the new module
+from api_client import CalendarAPIClient
 
 # Add at the top of file
 os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"  # Proper HiDPI support
 os.environ["QT_API"] = "pyqt6"  # Explicitly request PyQt6
+
+# Add specific styling constants (optional, but good practice)
+BORDER_RADIUS = "12px"
+PANEL_BACKGROUND = "#FFFFFF" # Assuming the panels are on a white background in the image
+TEXT_COLOR_PRIMARY = "#000000" # Black for main text
+TEXT_COLOR_SECONDARY = "#8A8A8E" # Gray for subtitles, detected info
+TEXT_COLOR_PLACEHOLDER = "#C7C7CC" # Lighter gray for placeholders
+BUTTON_COLOR = "#007AFF" # Apple blue
+BUTTON_HOVER_COLOR = "#006EE6"
+BORDER_COLOR_LIGHT = "#E5E5EA"
+BORDER_COLOR_DASHED = "#C7C7CC"
 
 class ImageAttachmentArea(QLabel):
     """Custom widget for handling image drag and drop"""
@@ -176,220 +191,6 @@ class ImageAttachmentArea(QLabel):
         """)
 
 
-class CalendarAPIClient:
-    # Class-level constant for SYSTEM instructions
-    SYSTEM_PROMPT = """
-Follow these steps to create the .ics file content:
-
-1. Carefully parse the event details to identify if there are multiple events described. If so, separate them for individual processing.
-
-2. For each event, extract all relevant information such as event title, date, time, location, description, and any other provided details. If the event involves flights between different cities, be aware that the departure and arrival times may be in different time zones. Adjust the event times accordingly by converting them to UTC, ensuring accurate reflection of time differences. Employ a chain-of-thought process with reflection and verification to ensure proper handling of these time differences.
-
-3. Generate the .ics file content using the following strict formatting rules:
-   REQUIRED CALENDAR STRUCTURE:
-   - BEGIN:VCALENDAR
-   - VERSION:2.0 (mandatory)
-   - PRODID:-//Your identifier//EN (mandatory)
-   
-   REQUIRED EVENT FORMATTING:
-   - BEGIN:VEVENT
-   - UID: Generate unique using format YYYYMMDDTHHMMSSZ-identifier@domain
-   - DTSTAMP: Current time in format YYYYMMDDTHHMMSSZ
-   - DTSTART: Event start in format YYYYMMDDTHHMMSSZ
-   - DTEND: Event end in format YYYYMMDDTHHMMSSZ
-   - SUMMARY: Event title
-   - DESCRIPTION: Properly escaped text using backslash before commas, semicolons, and newlines (\, \; \n)
-   
-   OPTIONAL BUT RECOMMENDED:
-   - LOCATION: Venue details with proper escaping
-   - CATEGORIES: Event type/category
-   
-   REMINDER STRUCTURE:
-   - BEGIN:VALARM
-   - ACTION:DISPLAY
-   - DESCRIPTION:Reminder
-   - TRIGGER:-PT30M (or your preferred timing)
-   - END:VALARM
-   
-   CRITICAL FORMATTING RULES:
-   1. DATETIME FIELD REQUIREMENTS (STRICTLY ENFORCED):
-      - MANDATORY 'T' separator between date and time components
-      - Format must be: YYYYMMDD'T'HHMMSS'Z'
-      - Examples of CORRECT format:
-        * 20241025T130000Z  ✓ (correct with T separator)
-        * 20250101T090000Z  ✓ (correct with T separator)
-      - Examples of INCORRECT format:
-        * 20241025130000Z   ✗ (missing T separator)
-        * 2024-10-25T13:00:00Z  ✗ (contains hyphens and colons)
-        * 20241025 130000Z  ✗ (contains space instead of T)
-      - The 'Z' suffix is required for UTC timezone
-      - This format is REQUIRED for ALL datetime fields:
-        * DTSTART
-        * DTEND
-        * DTSTAMP
-        * UID (when using timestamp)
-
-   2. EXAMPLE OF CORRECT FORMATTING:
-      ```ics
-      BEGIN:VCALENDAR
-      VERSION:2.0
-      PRODID:-//Example Corp//Calendar App//EN
-      BEGIN:VEVENT
-      UID:20240325T123000Z-flight123@example.com
-      DTSTAMP:20240325T123000Z
-      DTSTART:20240401T090000Z
-      DTEND:20240401T100000Z
-      SUMMARY:Flight BA123
-      DESCRIPTION:British Airways | Economy\\nDeparture: T2\\nArrival: T5
-      END:VEVENT
-      END:VCALENDAR
-      ```
-
-   3. VALIDATION REQUIREMENTS:
-      - Every datetime field MUST include the T separator
-      - No exceptions are allowed for any datetime fields
-      - Calendar applications will reject files without proper T separators
-      - Always validate before creating the ICS file
-
-4. Ensure all text is properly escaped, replacing any newline characters in the SUMMARY, LOCATION, or DESCRIPTION fields with "\\n".
-5. Wrap each complete .ics file content in numbered <ics_file_X> tags, where X is the event number (starting from 1).
-
-Here's a detailed breakdown of the .ics file structure:
-
-BEGIN:VCALENDAR\r\n
-VERSION:2.0\r\n
-PRODID:-//Your Company//Your Product//EN\r\n
-BEGIN:VEVENT\r\n
-UID:YYYYMMDDTHHMMSSZ-identifier@domain.com\r\n
-DTSTAMP:20250207T120000Z           # Current time, must include T and Z\r\n
-DTSTART:20250207T200000Z           # Must include T and Z\r\n
-DTEND:20250207T210000Z             # Must include T and Z\r\n
-SUMMARY:Event Title\r\n
-LOCATION:Location with\\, escaped commas\r\n
-DESCRIPTION:Description with\\, escaped commas\\; and semicolons\\nand newlines\r\n
-BEGIN:VALARM\r\n
-ACTION:DISPLAY\r\n
-DESCRIPTION:Reminder\r\n
-TRIGGER:-PT30M\r\n
-END:VALARM\r\n
-END:VEVENT\r\n
-END:VCALENDAR
-"""
-
-    # Class-level template for USER prompts (with dynamic placeholders)
-    USER_PROMPT_TEMPLATE = """
-<event_description>
-{event_description}
-</event_description>
-
-Today's date is {day_name}, {formatted_date}.
-"""
-
-    def __init__(self, api_key: str):
-        # Import genai here for lazy loading and store as instance variable
-        import google.generativeai as genai
-        self.genai = genai
-        
-        # Configure the API key
-        self.genai.configure(api_key=api_key)
-        
-        self.generation_config = {
-            "temperature": 0,
-            "top_p": 0.3,
-            "top_k": 64,
-            "max_output_tokens": 8192,
-            "response_mime_type": "text/plain",
-        }
-
-        # Validation layer: Ensure USER_PROMPT_TEMPLATE contains the required keys.
-        template_keys = [fn for _, fn, _, _ in Formatter().parse(self.USER_PROMPT_TEMPLATE) if fn]
-        required_keys = {'event_description', 'day_name', 'formatted_date'}
-        assert set(template_keys) == required_keys, f"Template mismatch! Expected keys {required_keys} but got {set(template_keys)}"
-
-        self.model = self.genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            generation_config=self.generation_config,
-            system_instruction=self.SYSTEM_PROMPT
-        )
-        self.base_delay = 1
-        self.max_retries = 5
-
-    def upload_to_gemini(self, path, mime_type=None):
-        """Uploads the given file to Gemini."""
-        file = self.genai.upload_file(path, mime_type=mime_type)
-        print(f"Uploaded file '{file.display_name}' as: {file.uri}")
-        return file
-
-    def create_calendar_event(self, event_description: str, image_data: list[tuple[str, str, str]],
-                              status_callback: callable) -> Optional[str]:
-        """
-        Create calendar event with enhanced error handling and status updates.
-        This method supports both text and image attachments.
-        """
-        # If no text is provided but there are attached images, use a default description.
-        if not event_description and image_data:
-            event_description = "Event details are provided via attached images."
-
-        current_date = datetime.now()
-        day_name = current_date.strftime("%A")
-        formatted_date = current_date.strftime("%B %d, %Y")
-
-        # Build the dynamic prompt using the class-level USER_PROMPT_TEMPLATE.
-        api_prompt = self.USER_PROMPT_TEMPLATE.format(
-            event_description=event_description,
-            day_name=day_name,
-            formatted_date=formatted_date
-        )
-
-        for attempt in range(self.max_retries):
-            try:
-                status_callback(f"Attempting to create event... (Try {attempt + 1}/{self.max_retries})")
-                print(f"DEBUG: Attempt {attempt + 1}/{self.max_retries}")
-                print("DEBUG: Generated API prompt (first 200 chars):", api_prompt[:200])
-
-                # Prepare chat history (add any uploaded image parts if images are provided)
-                history = []
-                if image_data:
-                    image_parts = []
-                    for img in image_data:
-                        # Unpack tuple: (file_path, mime_type, base64_data)
-                        file_path, mime_type, _ = img  
-                        uploaded_file = self.upload_to_gemini(file_path, mime_type=mime_type)
-                        image_parts.append(uploaded_file)
-                    history.append({
-                        "role": "user",
-                        "parts": image_parts
-                    })
-
-                # Start the chat session with the provided image history (if any)
-                chat_session = self.model.start_chat(history=history)
-                # Send the text prompt as the follow-up message.
-                message = chat_session.send_message(api_prompt)
-                
-                # Try to obtain the text response.
-                response_text = getattr(message, 'text', None)
-                if response_text is None:
-                    response_text = str(message)
-                
-                print("DEBUG: API Response:", response_text)
-                print("DEBUG: API call successful on attempt", attempt + 1)
-                return response_text
-
-            except Exception as e:
-                print(f"DEBUG: Exception on attempt {attempt + 1}: {e}")
-                if attempt < self.max_retries - 1:
-                    delay = self.base_delay * (2 ** attempt)
-                    status_callback(f"Error occurred, retrying in {delay} seconds...")
-                    print(f"DEBUG: Retrying in {delay} seconds...")
-                    time.sleep(delay)
-                    continue
-                print("DEBUG: Max retries reached. Raising exception.")
-                raise
-
-        print("DEBUG: Failed to create calendar event after retries.")
-        return None
-
-
 class PulsingLoadingIndicator(QWidget):
     """Custom animated loading indicator with pulsing dots"""
     
@@ -455,303 +256,348 @@ class NLCalendarCreator(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Natural Language Calendar Event")
-        self.setFixedSize(1000, 500)  # Slightly larger window for better proportions
+        self.setWindowTitle("Create Calendar Event")
+        self.setMinimumSize(600, 450) # Adjusted minimum size
+        self.resize(700, 500) # Default size
 
-        # Remove problematic WA_DontShowOnScreen attribute
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setStyleSheet("background-color: #1E1E1E;")
-        
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        # Fix parent widget for main layout
-        main_layout = QHBoxLayout(central_widget)
-        
-        # Force equal width for both panels
-        left_panel = QWidget()
-        left_panel.setFixedWidth(460)  # (1000 - 40 margins - 20 spacing) / 2 = 460
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)  # Spacing between elements
-        
-        right_panel = QWidget()
-        right_panel.setFixedWidth(460)  # Equal width as left panel
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Status label (spans both panels)
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("""
-            QLabel {
-                color: #86868B;
-                font-size: 13px;
-                font-weight: 500;
-                letter-spacing: -0.08px;
-                padding: 6px 12px;
-                border-radius: 6px;
-                background-color: rgba(255, 255, 255, 0.05);
-                backdrop-filter: blur(10px);
-                border: 1px solid rgba(255, 255, 255, 0.1);
-                transition: all 0.2s ease;
-            }
+        # --- Main Container Widget ---
+        # Use a QWidget as the central widget for easier styling control
+        main_container = QWidget(self)
+        main_container.setObjectName("mainContainer") # For specific styling
+        main_container.setStyleSheet(f"""
+            #mainContainer {{
+                background-color: #F2F2F7; /* Light gray background like the image */
+                border-radius: {BORDER_RADIUS};
+                /* No border needed here if the window itself is frameless/styled */
+            }}
+            QLabel {{
+                background-color: transparent; /* Ensure labels don't have unwanted backgrounds */
+            }}
         """)
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.hide()
-        
-        # Left panel components
-        instruction_label = QLabel("Create a Calendar Event Using Natural Language or Photos!")
-        instruction_label.setStyleSheet("""
-            QLabel {
+        self.setCentralWidget(main_container)
+
+        # --- Overall Layout ---
+        # Use a single QVBoxLayout for the main container
+        outer_layout = QVBoxLayout(main_container)
+        outer_layout.setContentsMargins(30, 20, 30, 20) # Add padding around everything
+        outer_layout.setSpacing(15) # Spacing between sections
+
+        # --- 1. Top Title/Subtitle Section ---
+        title_layout = QVBoxLayout()
+        title_layout.setSpacing(4)
+        title_layout.setContentsMargins(0, 0, 0, 10) # Margin below title section
+
+        title_label = QLabel("Create a Calendar Event")
+        title_label.setStyleSheet(f"""
+            QLabel {{
+                font-size: 24px; /* Larger font */
+                font-weight: 600; /* Semibold */
+                color: {TEXT_COLOR_PRIMARY};
+                qproperty-alignment: 'AlignCenter';
+            }}
+        """)
+
+        subtitle_label = QLabel("Type freely or drop a photo. We'll do the rest.")
+        subtitle_label.setStyleSheet(f"""
+            QLabel {{
+                font-size: 14px;
+                color: {TEXT_COLOR_SECONDARY};
+                qproperty-alignment: 'AlignCenter';
+            }}
+        """)
+
+        title_layout.addWidget(title_label)
+        title_layout.addWidget(subtitle_label)
+        outer_layout.addLayout(title_layout)
+
+        # --- 2. Main Content Area (Horizontal Split) ---
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(25) # Spacing between the two columns
+
+        # --- 2a. Left Panel: Event Details ---
+        left_panel_layout = QVBoxLayout()
+        left_panel_layout.setSpacing(15)
+
+        event_details_title = QLabel("Event Details")
+        event_details_title.setStyleSheet(f"""
+            QLabel {{
                 font-size: 16px;
                 font-weight: 600;
-                color: #FFFFFF;
-                margin-bottom: 4px;
-            }
+                color: {TEXT_COLOR_PRIMARY};
+            }}
         """)
-        
-        example_label = QLabel(
-            "Examples:\n"
-            "• Schedule a weekly team sync every Tuesday at 10am until end of quarter\n"
-            "• Dinner reservation at Osteria next Friday at 7:30pm for 2 hours\n"
-            "• Vacation in Hawaii from July 15th to 22nd with flight details in the notes\n"
-            "• Birthday party at Central Park next Saturday 3-6pm, bring snacks and games"
-        )
-        example_label.setStyleSheet("""
-            QLabel {
-                font-size: 12px;
-                color: #8E8E93;
-                font-style: italic;
-                margin-bottom: 16px;
-                line-height: 1.6;
-            }
+        left_panel_layout.addWidget(event_details_title)
+
+        # --- Example Input/Detected Area ---
+        # Use a QWidget as a styled container
+        example_input_container = QWidget()
+        example_input_container.setObjectName("exampleInputContainer")
+        example_input_container.setStyleSheet(f"""
+            #exampleInputContainer {{
+                background-color: {PANEL_BACKGROUND};
+                border: 1px solid {BORDER_COLOR_LIGHT};
+                border-radius: 8px;
+                padding: 0px;
+            }}
         """)
-        
+        example_input_layout = QVBoxLayout(example_input_container)
+        example_input_layout.setContentsMargins(12, 8, 12, 8) # Adjusted inner margins
+        example_input_layout.setSpacing(6) # Better spacing inside the container
+
+        # Replace QLabel with an actual editable QTextEdit for input
         self.text_input = QTextEdit()
-        self.text_input.setStyleSheet("""
-            QTextEdit {
-                color: #FFFFFF;
-                background-color: #2D2D2D;
-                border: 1px solid #3F3F3F;
+        self.text_input.setPlaceholderText("e.g. Dinner with Mia at\nBalthasar next Friday 7:30pm")
+        self.text_input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.text_input.setStyleSheet(f"""
+            QTextEdit {{
+                color: {TEXT_COLOR_PRIMARY}; 
+                background-color: transparent;
+                border: none;
+                font-size: 14px;
+                padding: 4px 0px;
+            }}
+            QTextEdit:focus {{
+                border: none;
+                outline: none;
+            }}
+        """)
+        self.text_input.setFixedHeight(60) # Allow reasonable height for input
+
+        # Keep detected section with improved spacing
+        detected_label = QLabel(f"Detected: <span style='color:{TEXT_COLOR_PRIMARY};'>Dinner • Mar 30</span>")
+        detected_label.setStyleSheet(f"""
+            QLabel {{
+                color: {TEXT_COLOR_SECONDARY};
+                font-size: 13px;
+                padding: 3px 0px; /* Add vertical padding to prevent clipping */
+            }}
+        """)
+
+        detected_time_label = QLabel(f"<span style='color:{TEXT_COLOR_PRIMARY};'>7:30 PM</span>")
+        detected_time_label.setStyleSheet(f"""
+             QLabel {{
+                 color: {TEXT_COLOR_SECONDARY};
+                 font-size: 13px;
+                 padding: 3px 0px; /* Add vertical padding to prevent clipping */
+             }}
+         """)
+
+        # Add a separator between input and detected info
+        separator = QWidget()
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(f"background-color: {BORDER_COLOR_LIGHT};")
+        separator.setContentsMargins(0, 8, 0, 8)
+
+        # Add widgets to layout with better spacing
+        example_input_layout.addWidget(self.text_input)
+        example_input_layout.addWidget(separator)
+        example_input_layout.addWidget(detected_label)
+        example_input_layout.addWidget(detected_time_label)
+
+        left_panel_layout.addWidget(example_input_container)
+
+
+        # --- Preview Area ---
+        preview_title = QLabel("This is what we'll create in\nyour calendar")
+        preview_title.setWordWrap(True)
+        preview_title.setStyleSheet(f"""
+            QLabel {{
+                font-size: 13px;
+                color: {TEXT_COLOR_SECONDARY};
+                margin-top: 5px; /* Space above preview */
+            }}
+        """)
+        left_panel_layout.addWidget(preview_title)
+
+        preview_container = QWidget()
+        preview_container.setObjectName("previewContainer")
+        preview_container.setStyleSheet(f"""
+             #previewContainer {{
+                 background-color: {PANEL_BACKGROUND};
+                 border: 1px solid {BORDER_COLOR_LIGHT};
+                 border-radius: 8px;
+                 padding: 10px 12px; /* Slightly less padding */
+             }}
+         """)
+        preview_layout = QHBoxLayout(preview_container) # Horizontal layout for preview
+        preview_layout.setContentsMargins(0,0,0,0)
+        preview_layout.setSpacing(10)
+
+        preview_event_title = QLabel("Dinner with Mia")
+        preview_event_title.setStyleSheet(f"color: {TEXT_COLOR_PRIMARY}; font-size: 14px; font-weight: 500;")
+
+        preview_date = QLabel("Mar 30")
+        preview_date.setStyleSheet(f"color: {TEXT_COLOR_SECONDARY}; font-size: 13px;")
+
+        preview_time = QLabel("7:30 PM–9:00 PM")
+        preview_time.setStyleSheet(f"color: {TEXT_COLOR_SECONDARY}; font-size: 13px;")
+
+        preview_layout.addWidget(preview_event_title, 1) # Title takes available space
+        preview_layout.addWidget(preview_date)
+        preview_layout.addWidget(preview_time)
+
+        left_panel_layout.addWidget(preview_container)
+        left_panel_layout.addStretch(1) # Push content up
+
+        # --- 2b. Right Panel: Photo Attachments ---
+        right_panel_layout = QVBoxLayout()
+        right_panel_layout.setSpacing(15)
+
+        photo_title = QLabel("Photo Attachments")
+        photo_title.setStyleSheet(f"""
+            QLabel {{
+                font-size: 16px;
+                font-weight: 600;
+                color: {TEXT_COLOR_PRIMARY};
+            }}
+        """)
+        right_panel_layout.addWidget(photo_title)
+
+        # --- Image Drop Area ---
+        # Re-use the existing ImageAttachmentArea, but update styling/text
+        self.image_area = ImageAttachmentArea()
+        self.image_area.setText("Drop image or\nscreenshot here\nto attach to event")
+        self.image_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_area.setWordWrap(True)
+        self.image_area.setStyleSheet(f"""
+            QLabel {{
+                border: 2px dashed {BORDER_COLOR_DASHED};
                 border-radius: 8px;
                 padding: 12px;
-                line-height: 1.6;
+                background-color: {PANEL_BACKGROUND}; /* Match other panels */
+                color: {TEXT_COLOR_PLACEHOLDER}; /* Placeholder text color */
                 font-size: 14px;
-            }
-            QTextEdit:focus {
-                border: 1px solid #0A84FF;
-                background-color: #363636;
-            }
+                min-height: 150px; /* Ensure it has some height */
+            }}
+            QLabel:hover {{
+                border-color: {BUTTON_COLOR}; /* Blue highlight on hover */
+                background-color: #F7F7FC; /* Slightly different background on hover */
+            }}
         """)
-        self.text_input.setPlaceholderText("Type your event details here...")
-        
-        # Add components to left panel
-        left_layout.addWidget(instruction_label, 0)  # 0 = no stretch
-        left_layout.addWidget(example_label, 0)
-        left_layout.addWidget(self.text_input, 1)  # 1 = stretch to fill space
-        
-        # Progress bar
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.progress.setMaximumHeight(3)
-        self.progress.hide()
-        self.progress.setStyleSheet("""
-            QProgressBar {
-                border: none;
-                background: rgba(45, 45, 45, 0.3);
-                border-radius: 1.5px;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #0A84FF,
-                    stop:0.4 #60A5FA,
-                    stop:0.6 #60A5FA,
-                    stop:1 #0A84FF);
-                border-radius: 1.5px;
-            }
-        """)
-        
-        # Create Event button - now part of left panel
+        # Make image area take available vertical space
+        self.image_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        right_panel_layout.addWidget(self.image_area, 1) # Add stretch factor
+
+        # Add left and right panels to the main content layout
+        content_layout.addLayout(left_panel_layout, 1) # Add stretch factor
+        content_layout.addLayout(right_panel_layout, 1) # Add stretch factor
+
+        # Add content layout to the outer layout
+        outer_layout.addLayout(content_layout, 1) # Make content area expand vertically
+
+        # --- 3. Bottom Create Button ---
+        button_layout = QHBoxLayout()
+        button_layout.addStretch(1) # Push button to the right/center
         self.create_button = QPushButton("Create Event")
-        self.create_button.clicked.connect(self.process_event)
-        self.create_button.setFixedHeight(40)  # Taller button
-        self.create_button.setStyleSheet("""
-            QPushButton {
-                background-color: #0A84FF;
+        self.create_button.clicked.connect(self.process_event) # Connect signal
+        self.create_button.setMinimumHeight(44) # Make button taller
+        self.create_button.setMinimumWidth(150) # Give it some width
+        self.create_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {BUTTON_COLOR};
                 color: white;
                 border: none;
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-size: 14px;
-                font-weight: 500;
-                letter-spacing: 0.2px;
-            }
-            QPushButton:hover {
-                background-color: #0071E3;
-            }
-            QPushButton:pressed {
-                background-color: #006CDC;
-            }
+                border-radius: 8px; /* Slightly more rounded */
+                padding: 10px 24px;
+                font-size: 16px; /* Slightly larger font */
+                font-weight: 500; /* Medium weight */
+            }}
+            QPushButton:hover {{
+                background-color: {BUTTON_HOVER_COLOR};
+            }}
+            QPushButton:pressed {{
+                background-color: #005AB3; /* Darker pressed state */
+            }}
+            QPushButton:disabled {{
+                background-color: #BDBDBD; /* Gray out when disabled */
+                color: #757575;
+            }}
         """)
+        button_layout.addWidget(self.create_button)
+        button_layout.addStretch(1) # Push button to the left/center
+        outer_layout.addLayout(button_layout)
 
-        # Add progress and button to left panel
-        left_layout.addWidget(self.progress)
-        left_layout.addWidget(self.create_button)
-        
-        # Right panel components
-        image_label = QLabel("Photo Attachments of Events")
-        image_label.setStyleSheet("""
-            QLabel {
-                font-size: 16px;
-                font-weight: 600;
-                color: #FFFFFF;
-                margin-bottom: 4px;
-            }
-        """)
-        
-        self.image_area = ImageAttachmentArea()
-        self.image_area.setMinimumHeight(350)  # Taller to match text input area
-        
-        self.clear_attachments_btn = QPushButton("Clear Attachments")
-        self.clear_attachments_btn.clicked.connect(self.clear_attachments)
-        self.clear_attachments_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF3B30;
-                color: white;
-                padding: 4px 12px;
-                font-size: 12px;
-                border-radius: 6px;
-                max-width: 150px;
-            }
-            QPushButton:hover {
-                background-color: #FF453A;
-            }
-        """)
-        self.clear_attachments_btn.hide()
-        
-        # Add components to right panel
-        right_layout.addWidget(image_label, 0)
-        right_layout.addWidget(self.image_area, 1)  # 1 = stretch to fill space
-        right_layout.addWidget(self.clear_attachments_btn, 0, Qt.AlignmentFlag.AlignCenter)
-        
-        # Main horizontal layout
-        main_layout.addWidget(left_panel)
-        main_layout.addWidget(right_panel)
-        
-        # Final layout with status label
-        final_layout = QVBoxLayout()
-        final_layout.addWidget(self.status_label)
-        final_layout.addLayout(main_layout)
-        
-        # Set the final layout
-        central_widget.setLayout(final_layout)
-
-        # Initialize progress animation
-        self.progress_animation = None
-        self.progress_value = 0
-
-        # Add critical style rules back
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #1E1E1E;
-                border: 1px solid #3F3F3F;
-                border-radius: 12px;
-            }
-            ImageAttachmentArea {
-                min-height: 350px;
-            }
-            QTextEdit {
-                margin: 8px 0;
-            }
-        """)
-        
-        # Defer UI refresh
-        QTimer.singleShot(100, self.refresh_ui)
-
-        # Initialize api_client as None
+        # --- Initialization of other components (API client, overlay, etc.) ---
+        # Keep these as they handle functionality, not the static look
         self.api_client = None
+        # Setup overlay (keep as it's for dynamic state)
+        self._setup_overlay()
 
-        # Add overlay widget for processing state
-        self.overlay = QWidget(self)
-        self.overlay.setStyleSheet("""
-            QWidget {
-                background-color: rgba(30, 30, 30, 0.85);
-                border-radius: 12px;
-            }
+        # Connect signals needed for dynamic behavior (keep these)
+        self.update_status_signal.connect(self.update_status) # Status updates if needed
+        self.enable_ui_signal.connect(self._enable_ui)
+        self.clear_input_signal.connect(self._clear_input) # To clear the input field later
+        # self.show_progress_signal.connect(...) # Progress bar removed
+
+        # Defer UI refresh if needed (less critical now with simpler layout)
+        # QTimer.singleShot(10, self.refresh_ui)
+
+    def _setup_overlay(self):
+        """Sets up the overlay widget for processing indication."""
+        # Keep the overlay logic, but hide it initially
+        self.overlay = QWidget(self.centralWidget()) # Parent is the central widget
+        self.overlay.setObjectName("overlayWidget")
+        self.overlay.setStyleSheet(f"""
+            #overlayWidget {{
+                background-color: rgba(242, 242, 247, 0.85); /* Semi-transparent background */
+                border-radius: {BORDER_RADIUS}; /* Match parent container */
+            }}
         """)
         self.overlay.hide()
 
-        # Create layout for overlay content
         overlay_layout = QVBoxLayout(self.overlay)
         overlay_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        overlay_layout.setSpacing(15)
 
-        # Add processing label
-        self.processing_label = QLabel("Processing Request...")
-        self.processing_label.setStyleSheet("""
-            QLabel {
-                color: white;
+        # Simplified processing indicator
+        self.processing_label = QLabel("Processing...") # Simple text
+        self.processing_label.setStyleSheet(f"""
+            QLabel {{
+                color: {TEXT_COLOR_PRIMARY};
                 font-size: 16px;
-                font-weight: bold;
-                padding: 20px 35px;
-                background-color: rgba(10, 132, 255, 0.15);
+                font-weight: 500;
+                padding: 15px 30px;
+                background-color: rgba(255, 255, 255, 0.7); /* White-ish box */
                 border-radius: 10px;
-                border: 1px solid rgba(255, 255, 255, 0.15);
-                min-width: 250px;
-                max-width: 400px;
-            }
+                border: 1px solid {BORDER_COLOR_LIGHT};
+            }}
         """)
         self.processing_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         overlay_layout.addWidget(self.processing_label)
-        
-        # Add animated loading indicator
-        self.loading_indicator = PulsingLoadingIndicator(self.overlay)
-        overlay_layout.addWidget(self.loading_indicator, 0, Qt.AlignmentFlag.AlignCenter)
-        overlay_layout.setSpacing(15)  # Add space between label and indicator
-        
-        # Connect signals to slots
-        self.update_status_signal.connect(self.update_status)
-        self.enable_ui_signal.connect(self._enable_ui)
-        self.clear_input_signal.connect(self._clear_input)
-        self.show_progress_signal.connect(self._show_progress)
 
-        # Make sure the overlay covers the entire window
-        self.overlay.resize(self.size())
+        # Optional: Add a QProgressIndicator or similar if needed instead of the pulsing dots
+        # self.loading_indicator = QProgressIndicator(self.overlay) # Example
+        # overlay_layout.addWidget(self.loading_indicator, 0, Qt.AlignmentFlag.AlignCenter)
 
-    def refresh_ui(self):
-        """Trigger full UI update after initial layout"""
-        self.updateGeometry()
-        self.repaint()
+    def resizeEvent(self, event):
+        """Handle resize events to keep overlay properly sized."""
+        super().resizeEvent(event)
+        # Ensure overlay covers the central widget
+        self.overlay.resize(self.centralWidget().size())
 
-    def _update_progress(self):
-        """Update progress bar animation"""
-        self.progress_value = (self.progress_value + 1) % 100
-        self.progress.setValue(self.progress_value)
-
+    # Add placeholder methods required by signals if they were removed/changed
     def update_status(self, message: str):
-        """Update status label and processing label with animation"""
-        if message:
-            self.status_label.setText(message)
-            self.status_label.show()
-            
-            # Update the processing label with the current status
-            # Add an animated ellipsis effect if the message indicates waiting
-            waiting_indicators = ["processing", "creating", "generating", "waiting", "preparing"]
-            
-            if any(indicator in message.lower() for indicator in waiting_indicators):
-                # The loading indicator will show animation, so keep text clean
-                self.processing_label.setText(message)
-            else:
-                # For completion messages, no need for ellipsis
-                self.processing_label.setText(message)
-        else:
-            self.status_label.hide()
-        
-        # Force immediate UI update
-        QApplication.processEvents()
+         print(f"Status Update: {message}") # Placeholder if status label removed
+         # Update processing label if overlay is visible
+         if not self.create_button.isEnabled():
+             self.processing_label.setText(message)
 
-    def show_window(self):
-        """Show the window and bring it to front"""
-        self.show()
-        self.activateWindow()
+    def _enable_ui(self, enabled: bool):
+         # Enable/disable interactive elements
+         self.text_input.setEnabled(enabled) # Enable/disable actual text input
+         self.image_area.setEnabled(enabled)
+         self.create_button.setEnabled(enabled)
+
+         if enabled:
+             self.overlay.hide()
+         else:
+             self.processing_label.setText("Processing...") # Reset overlay text
+             self.overlay.raise_() # Ensure overlay is on top
+             self.overlay.show()
+
+    def _clear_input(self):
+         # Clear the actual input method
+         self.text_input.clear()
 
     def process_event(self):
         """Process the natural language input and create calendar event"""
@@ -759,9 +605,23 @@ class NLCalendarCreator(QMainWindow):
         if not self.api_client:
             api_key = os.environ.get('GEMINI_API_KEY')
             if not api_key:
-                raise RuntimeError("Missing environment variable gemini_api_key")
-            self.api_client = CalendarAPIClient(api_key=api_key)
+                QMessageBox.critical(
+                    self,
+                    "API Key Error",
+                    "GEMINI_API_KEY environment variable not set. Please set it before continuing."
+                )
+                return
+            try:
+                self.api_client = CalendarAPIClient(api_key=api_key)
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "API Client Error",
+                    f"Failed to initialize the API client: {str(e)}"
+                )
+                return
 
+        # Get text from the proper QTextEdit input
         event_description = self.text_input.toPlainText().strip()
         has_images = bool(self.image_area.image_data)
         
@@ -780,9 +640,8 @@ class NLCalendarCreator(QMainWindow):
         
         # At this point, we have either text, images, or both - proceed with processing
         self.enable_ui_signal.emit(False)
-        self.show_progress_signal.emit(True)
 
-        # Pass image data to the thread
+        # Pass event description and image data to the thread
         threading.Thread(
             target=self._create_event_thread, 
             args=(event_description, self.image_area.image_data.copy())
@@ -844,79 +703,10 @@ class NLCalendarCreator(QMainWindow):
             QTimer.singleShot(0, self._show_error, Qt.ConnectionType.QueuedConnection, Q_ARG(str, str(e)))
         finally:
             self.enable_ui_signal.emit(True)
-            self.show_progress_signal.emit(False)
-            # Clear attachments after processing.
-            self.clear_attachments()
-
-    def _enable_ui(self, enabled: bool):
-        """Enable or disable UI elements with overlay"""
-        self.text_input.setEnabled(enabled)
-        self.create_button.setEnabled(enabled)
-        self.image_area.setEnabled(enabled)
-        
-        if enabled:
-            self.overlay.hide()
-            self.loading_indicator.stop_animation()
-            self.processing_label.setText("Processing Request...")
-        else:
-            # Show overlay with blur effect
-            self.overlay.show()
-            
-            # Start the loading animation
-            self.loading_indicator.start_animation()
-
-    def _clear_input(self):
-        """Clear the text input"""
-        self.text_input.clear()
-
-    def _show_progress(self, show: bool):
-        """Show or hide progress bar with smooth animation"""
-        if show:
-            self.progress.show()
-            self.progress.setRange(0, 100)
-            self.progress.setValue(0)
-            self._animate_progress()
-        else:
-            self.progress_animation.stop()
-            self.progress.hide()
-
-    def _animate_progress(self):
-        """Create smooth indeterminate progress animation"""
-        # Lazy load QPropertyAnimation
-        from PyQt6.QtCore import QPropertyAnimation
-        
-        current_value = self.progress.value()
-        if current_value >= 100:
-            self.progress.setValue(0)
-            current_value = 0
-
-        self.progress_animation = QPropertyAnimation(self.progress, b"value")
-        self.progress_animation.setDuration(2000)
-        self.progress_animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        self.progress_animation.setStartValue(current_value)
-        self.progress_animation.setEndValue(100)
-        self.progress_animation.finished.connect(self._restart_progress_animation)
-        self.progress_animation.start()
-
-    def _restart_progress_animation(self):
-        """Restart the progress animation when it finishes"""
-        if self.progress.isVisible():  # Only restart if still processing
-            self.progress.setValue(0)
-            self._animate_progress()
 
     def _show_error(self, message: str):
         """Show error message box (called from main thread)"""
         QMessageBox.critical(self, "Error", message)
-
-    def clear_attachments(self):
-        """Clear all attached images"""
-        self.image_area.reset_state()
-        self.clear_attachments_btn.hide()
-
-    def resizeEvent(self, event):
-        """Handle resize events to keep overlay properly sized"""
-        super().resizeEvent(event)
-        self.overlay.resize(self.size())
 
 
 if __name__ == '__main__':
