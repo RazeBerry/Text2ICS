@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtGui import QKeySequence, QShortcut, QIcon, QDragEnterEvent, QDropEvent, QPixmap, QPainter, QBrush, QColor
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject, QEasingCurve, QMimeData, QBuffer
 import time
-from typing import Optional
+from typing import Optional, List
 import random
 import threading
 import re
@@ -346,53 +346,27 @@ class NLCalendarCreator(QMainWindow):
 
         # Replace QLabel with an actual editable QTextEdit for input
         self.text_input = QTextEdit()
-        self.text_input.setPlaceholderText("e.g. Dinner with Mia at\nBalthasar next Friday 7:30pm")
+        self.text_input.setPlaceholderText("e.g. Dinner with Mia at Balthasar next Friday 7:30pm") # Keep multiline placeholder
         self.text_input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.text_input.setAcceptRichText(False) # Explicitly disable rich text input
         self.text_input.setStyleSheet(f"""
             QTextEdit {{
-                color: {TEXT_COLOR_PRIMARY}; 
-                background-color: transparent;
-                border: none;
+                color: {TEXT_COLOR_PRIMARY};
+                background-color: transparent; /* Keep transparent to blend with container */
+                border: none; /* No border on the text edit itself */
                 font-size: 14px;
-                padding: 4px 0px;
+                padding: 4px 0px; /* Minimal padding */
             }}
             QTextEdit:focus {{
                 border: none;
-                outline: none;
+                outline: none; /* Remove focus outline */
             }}
         """)
-        self.text_input.setFixedHeight(60) # Allow reasonable height for input
+        # Adjust height slightly - might need tweaking based on font/padding
+        self.text_input.setFixedHeight(100) # Increased height
 
-        # Keep detected section with improved spacing
-        detected_label = QLabel(f"Detected: <span style='color:{TEXT_COLOR_PRIMARY};'>Dinner • Mar 30</span>")
-        detected_label.setStyleSheet(f"""
-            QLabel {{
-                color: {TEXT_COLOR_SECONDARY};
-                font-size: 13px;
-                padding: 3px 0px; /* Add vertical padding to prevent clipping */
-            }}
-        """)
-
-        detected_time_label = QLabel(f"<span style='color:{TEXT_COLOR_PRIMARY};'>7:30 PM</span>")
-        detected_time_label.setStyleSheet(f"""
-             QLabel {{
-                 color: {TEXT_COLOR_SECONDARY};
-                 font-size: 13px;
-                 padding: 3px 0px; /* Add vertical padding to prevent clipping */
-             }}
-         """)
-
-        # Add a separator between input and detected info
-        separator = QWidget()
-        separator.setFixedHeight(1)
-        separator.setStyleSheet(f"background-color: {BORDER_COLOR_LIGHT};")
-        separator.setContentsMargins(0, 8, 0, 8)
-
-        # Add widgets to layout with better spacing
+        # Add only the text input widget to the layout
         example_input_layout.addWidget(self.text_input)
-        example_input_layout.addWidget(separator)
-        example_input_layout.addWidget(detected_label)
-        example_input_layout.addWidget(detected_time_label)
 
         left_panel_layout.addWidget(example_input_container)
 
@@ -584,16 +558,22 @@ class NLCalendarCreator(QMainWindow):
 
     def _enable_ui(self, enabled: bool):
          # Enable/disable interactive elements
+         print(f"DEBUG: _enable_ui called with enabled={enabled}") # DIAGNOSTIC
          self.text_input.setEnabled(enabled) # Enable/disable actual text input
          self.image_area.setEnabled(enabled)
          self.create_button.setEnabled(enabled)
+         print(f"DEBUG: Widgets enabled state set to {enabled}") # DIAGNOSTIC
 
          if enabled:
+             print("DEBUG: Attempting to hide overlay...") # DIAGNOSTIC
              self.overlay.hide()
+             print(f"DEBUG: Overlay hidden. Is visible: {self.overlay.isVisible()}") # DIAGNOSTIC
          else:
+             print("DEBUG: Attempting to show overlay...") # DIAGNOSTIC
              self.processing_label.setText("Processing...") # Reset overlay text
              self.overlay.raise_() # Ensure overlay is on top
              self.overlay.show()
+             print(f"DEBUG: Overlay shown. Is visible: {self.overlay.isVisible()}") # DIAGNOSTIC
 
     def _clear_input(self):
          # Clear the actual input method
@@ -649,59 +629,109 @@ class NLCalendarCreator(QMainWindow):
 
     def _create_event_thread(self, event_description, image_data):
         try:
-            # Lazy load subprocess
-            import subprocess
+            # Lazy load subprocess (already imported at top)
+            # import subprocess
             
             # Get the directory where Calender.py is located.
             script_dir = Path(__file__).parent.absolute()
             
-            # Get ICS content from API.
-            raw_content = self.api_client.create_calendar_event(
+            # Call the API client, which now returns a list of ICS strings
+            ics_strings: Optional[List[str]] = self.api_client.create_calendar_event(
                 event_description,
                 image_data,
                 lambda message: self.update_status_signal.emit(message)
             )
 
-            if not raw_content:
-                raise Exception("Failed to get response from API after multiple retries")
+            # Check if the API returned a list of strings
+            if not ics_strings:
+                # Use more specific error message if API returned None/empty explicitly
+                raise Exception("API returned no event data or failed after retries") 
 
-            # Imitate catching the "<ics_file_X>" mechanism:
-            # Look for content enclosed in <ics_file_1>, <ics_file_2>, etc.
-            ics_files = re.findall(r'<ics_file_\d+>(.*?)</ics_file_\d+>', raw_content, re.DOTALL)
+            self.update_status_signal.emit(f"Processing {len(ics_strings)} event(s)...")
 
-            # If the wrapped tags aren't present, assume the entire response is a single valid ICS event.
-            if not ics_files:
-                ics_files = [raw_content.strip()]
+            # Process each ICS string.
+            successful_saves = 0
+            temp_files_to_delete = [] # List to store paths for later cleanup
+            for idx, ics_content in enumerate(ics_strings, 1):
+                temp_path = None # Initialize in case of error in 'with' block
+                try:
+                    # Write to a secure temp file that WILL be deleted later if needed
+                    # Using NamedTemporaryFile ensures it exists for 'open' command
+                    # delete=False is crucial here, otherwise file is gone before 'open' runs
+                    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".ics", encoding='utf-8') as tf:
+                        tf.write(ics_content)
+                        temp_path = tf.name # Get the path for opening
+                        temp_files_to_delete.append(temp_path) # Store path for cleanup AFTER loop
 
-            self.update_status_signal.emit(f"Processing {len(ics_files)} event(s)...")
+                    # Cross-platform opener
+                    if sys.platform == "darwin":
+                        # Use -W to wait for the application to finish with the file
+                        subprocess.run(["open", "-W", temp_path], check=True)
+                    elif sys.platform.startswith("win"):
+                        os.startfile(temp_path)              # type: ignore
+                    else: # Assume Linux/other POSIX
+                        subprocess.run(["xdg-open", temp_path], check=True)
+                    
+                    self.update_status_signal.emit(f"Opened event {idx}/{len(ics_strings)}")
+                    successful_saves += 1
+                    
+                except FileNotFoundError:
+                    # This might happen if temp directory is invalid
+                    self.update_status_signal.emit(f"Error: Could not create temporary file for event {idx}.")
+                    print(f"Error: Failed to create temp file for event {idx}.")
+                except OSError as os_err:
+                    # For os.startfile errors or permission issues
+                    self.update_status_signal.emit(f"Error: Could not open event file for event {idx}: {os_err}")
+                    print(f"Error opening {temp_path} for event {idx}: {os_err}")
+                except subprocess.CalledProcessError as proc_err:
+                    # For errors running 'open' or 'xdg-open'
+                    self.update_status_signal.emit(f"Error: Failed to launch calendar app for event {idx}: {proc_err}")
+                    print(f"Error running opener for {temp_path} (event {idx}): {proc_err}")
+                except Exception as loop_err: # Catch other unexpected errors in the loop
+                    self.update_status_signal.emit(f"Unexpected error processing event {idx}: {loop_err}")
+                    print(f"Unexpected error for event {idx} ({temp_path}): {loop_err}")
 
-            # Process each ICS file.
-            for idx, ics_content in enumerate(ics_files, 1):
-                # Clean up the content.
-                ics_content = ics_content.strip()
+            # --- Clean up temporary files AFTER the loop ---
+            # Re-enable cleanup now that macOS uses 'open -W'
+            print(f"DEBUG: Cleaning up {len(temp_files_to_delete)} temp files...")
+            # Optional short delay - might not be necessary but can be added if issues persist
+            # time.sleep(0.5)
+            for path_to_delete in temp_files_to_delete:
+                if path_to_delete and os.path.exists(path_to_delete):
+                     try:
+                         os.unlink(path_to_delete)
+                         print(f"DEBUG: Cleaned up temp file: {path_to_delete}")
+                     except OSError as unlink_err:
+                         print(f"Warning: Could not delete temp file {path_to_delete}: {unlink_err}")
 
-                # Generate a unique filename for each event.
-                filename = script_dir / f"event_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx}.ics"
-                
-                # Save the ICS content to a file.
-                with open(filename, 'w', encoding='utf-8') as f:
-                    f.write(ics_content)
-                
-                # Open the file with the default calendar application.
-                subprocess.run(['open', str(filename)])
-                
-                self.update_status_signal.emit(f"Processed event {idx}/{len(ics_files)}")
+            # Final status update based on how many succeeded
+            if successful_saves == len(ics_strings):
+                 event_text = "events" if successful_saves > 1 else "event"
+                 final_message = f"Successfully opened {successful_saves} {event_text}!"
+            elif successful_saves > 0:
+                 final_message = f"Opened {successful_saves}/{len(ics_strings)} events. Some errors occurred."
+            else:
+                 final_message = "Error: Failed to open any event files."
+                 
+            self.update_status_signal.emit(final_message)
 
-            event_text = "events" if len(ics_files) > 1 else "event"
-            self.update_status_signal.emit(f"Successfully created {len(ics_files)} {event_text}!")
-
-            # Clear the text input and update the UI.
+            # Clear the text input and reset image area if needed
             self.clear_input_signal.emit()
+            # Assuming image_area has a method to clear/reset
+            if hasattr(self.image_area, 'reset_state'):
+                 # Use QTimer.singleShot to ensure it runs on the main thread
+                 QTimer.singleShot(0, self.image_area.reset_state)
 
         except Exception as e:
-            self.update_status_signal.emit("Error: Failed to create event(s)")
-            QTimer.singleShot(0, self._show_error, Qt.ConnectionType.QueuedConnection, Q_ARG(str, str(e)))
+            # Catch errors from the API call itself or if ics_strings was None
+            error_message = f"Error creating events: {str(e)}"
+            print(f"Error in _create_event_thread: {e}") # Log the full error
+            self.update_status_signal.emit(error_message) 
+            # Show error dialog on the main thread
+            # Pass the simplified error message to the user
+            QTimer.singleShot(0, lambda: self._show_error(error_message)) 
         finally:
+            # Ensure UI is re-enabled regardless of success or failure
             self.enable_ui_signal.emit(True)
 
     def _show_error(self, message: str):
