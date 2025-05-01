@@ -17,7 +17,7 @@ Follow these steps to extract event details and return them as a JSON array:
 
 1. Carefully parse the event details (text and any image context) to identify if multiple distinct events are described. If so, process each one separately.
 
-2. For each event, extract all relevant information such as event title, date, time, location, and description. If the event involves travel between different cities, be aware that the departure and arrival times may be in different time zones. Adjust the event times accordingly by converting them to UTC, ensuring accurate reflection of time differences. Employ a chain-of-thought process with reflection and verification to ensure proper handling of these time differences.
+2. For each event, extract all relevant information such as event title, date, time, location, and description. If the event involves travel between different cities, be aware that the departure and arrival times may be in different time zones. Adjust the event times accordingly by converting them to UTC, ensuring accurate reflection of time differences. Employ a chain-of-thought process with reflection and verification to ensure proper handling of these time differences. If the end time or duration is not specified, estimate a reasonable duration (e.g., 1 hour for meetings, 2-3 hours for dinners) and calculate the `end_utc` accordingly.
 
 3. Return a **JSON array**, one object per event.
    Keys REQUIRED per event:
