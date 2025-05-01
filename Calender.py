@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
                            QProgressBar, QHBoxLayout, QSizePolicy)
 from PyQt6.QtGui import QKeySequence, QShortcut, QIcon, QDragEnterEvent, QDropEvent, QPixmap, QPainter, QBrush, QColor
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject, QEasingCurve, QMimeData, QBuffer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject, QEasingCurve, QMimeData, QBuffer, pyqtSlot, Q_ARG
 import time
 from typing import Optional, List
 import random
@@ -506,6 +506,9 @@ class NLCalendarCreator(QMainWindow):
         # Defer UI refresh if needed (less critical now with simpler layout)
         # QTimer.singleShot(10, self.refresh_ui)
 
+        # Make the scheduling method invokable from other threads
+        QMetaObject.connectSlotsByName(self)
+
     def _setup_overlay(self):
         """Sets up the overlay widget for processing indication."""
         # Keep the overlay logic, but hide it initially
@@ -629,110 +632,156 @@ class NLCalendarCreator(QMainWindow):
 
     def _create_event_thread(self, event_description, image_data):
         try:
-            # Lazy load subprocess (already imported at top)
-            # import subprocess
-            
-            # Get the directory where Calender.py is located.
-            script_dir = Path(__file__).parent.absolute()
-            
-            # Call the API client, which now returns a list of ICS strings
+            # Get API client
+            if not self.api_client:
+                # Re-add API key check/initialization if necessary (assuming it's handled elsewhere or already initialized)
+                # ... (initialization logic potentially needed here) ...
+                # For now, assume self.api_client exists
+                pass
+
+            self.update_status_signal.emit("Requesting event details...")
             ics_strings: Optional[List[str]] = self.api_client.create_calendar_event(
                 event_description,
                 image_data,
                 lambda message: self.update_status_signal.emit(message)
             )
 
-            # Check if the API returned a list of strings
             if not ics_strings:
-                # Use more specific error message if API returned None/empty explicitly
-                raise Exception("API returned no event data or failed after retries") 
+                raise Exception("API returned no event data or failed after retries")
 
-            self.update_status_signal.emit(f"Processing {len(ics_strings)} event(s)...")
+            event_count = len(ics_strings)
+            event_text = "event" if event_count == 1 else "events"
+            self.update_status_signal.emit(f"Processing {event_count} {event_text}...")
+            print(f"DEBUG: Received {event_count} wrapped ICS string(s) from API.")
 
-            # Process each ICS string.
-            successful_saves = 0
-            temp_files_to_delete = [] # List to store paths for later cleanup
-            for idx, ics_content in enumerate(ics_strings, 1):
-                temp_path = None # Initialize in case of error in 'with' block
-                try:
-                    # Write to a secure temp file that WILL be deleted later if needed
-                    # Using NamedTemporaryFile ensures it exists for 'open' command
-                    # delete=False is crucial here, otherwise file is gone before 'open' runs
-                    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".ics", encoding='utf-8') as tf:
-                        tf.write(ics_content)
-                        temp_path = tf.name # Get the path for opening
-                        temp_files_to_delete.append(temp_path) # Store path for cleanup AFTER loop
+            # --- Assemble the combined ICS content CORRECTLY ---
+            combined_vevents = []
+            for i, single_ics in enumerate(ics_strings):
+                # Extract content between BEGIN:VEVENT and END:VEVENT
+                match = re.search(r"BEGIN:VEVENT(.*?)END:VEVENT", single_ics, re.DOTALL)
+                if match:
+                    vevent_content = match.group(0) # Includes BEGIN/END VEVENT
+                    combined_vevents.append(vevent_content)
+                    print(f"DEBUG: Extracted VEVENT {i+1}")
+                else:
+                    print(f"Warning: Could not extract VEVENT from ICS string {i+1}:\n{single_ics[:200]}...")
+            
+            if not combined_vevents:
+                 raise Exception("Failed to extract any valid VEVENT blocks from API response.")
 
-                    # Cross-platform opener
-                    if sys.platform == "darwin":
-                        # Use -W to wait for the application to finish with the file
-                        subprocess.run(["open", "-W", temp_path], check=True)
-                    elif sys.platform.startswith("win"):
-                        os.startfile(temp_path)              # type: ignore
-                    else: # Assume Linux/other POSIX
-                        subprocess.run(["xdg-open", temp_path], check=True)
-                    
-                    self.update_status_signal.emit(f"Opened event {idx}/{len(ics_strings)}")
-                    successful_saves += 1
-                    
-                except FileNotFoundError:
-                    # This might happen if temp directory is invalid
-                    self.update_status_signal.emit(f"Error: Could not create temporary file for event {idx}.")
-                    print(f"Error: Failed to create temp file for event {idx}.")
-                except OSError as os_err:
-                    # For os.startfile errors or permission issues
-                    self.update_status_signal.emit(f"Error: Could not open event file for event {idx}: {os_err}")
-                    print(f"Error opening {temp_path} for event {idx}: {os_err}")
-                except subprocess.CalledProcessError as proc_err:
-                    # For errors running 'open' or 'xdg-open'
-                    self.update_status_signal.emit(f"Error: Failed to launch calendar app for event {idx}: {proc_err}")
-                    print(f"Error running opener for {temp_path} (event {idx}): {proc_err}")
-                except Exception as loop_err: # Catch other unexpected errors in the loop
-                    self.update_status_signal.emit(f"Unexpected error processing event {idx}: {loop_err}")
-                    print(f"Unexpected error for event {idx} ({temp_path}): {loop_err}")
+            # Construct the final single ICS file content
+            final_ics_content = (
+                "BEGIN:VCALENDAR\r\n"
+                "VERSION:2.0\r\n"
+                "PRODID:-//NL Calendar Creator//EN\r\n"
+                + "\r\n".join(combined_vevents) +  # Join extracted VEVENT blocks with CRLF
+                "\r\nEND:VCALENDAR"
+            )
+            
+            print(f"DEBUG: Final combined ICS content (first 500 chars):\n------\n{final_ics_content[:500]}\n------")
 
-            # --- Clean up temporary files AFTER the loop ---
-            # Re-enable cleanup now that macOS uses 'open -W'
-            print(f"DEBUG: Cleaning up {len(temp_files_to_delete)} temp files...")
-            # Optional short delay - might not be necessary but can be added if issues persist
-            # time.sleep(0.5)
-            for path_to_delete in temp_files_to_delete:
-                if path_to_delete and os.path.exists(path_to_delete):
-                     try:
-                         os.unlink(path_to_delete)
-                         print(f"DEBUG: Cleaned up temp file: {path_to_delete}")
-                     except OSError as unlink_err:
-                         print(f"Warning: Could not delete temp file {path_to_delete}: {unlink_err}")
+            # --- Create, open, and clean up the single temp file ---
+            temp_path: Optional[str] = None # Explicitly define type
+            successful_import_initiated = False
+            command: Optional[List[str]] = None # Explicitly define type
+            try:
+                # 1. create the file with delete=False, using binary mode
+                with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix=".ics") as tf:
+                    tf.write(final_ics_content.encode('utf-8')) # Encode to bytes
+                    temp_path = tf.name
+                
+                self.update_status_signal.emit(f"Opening {event_count} {event_text} in calendar...")
 
-            # Final status update based on how many succeeded
-            if successful_saves == len(ics_strings):
-                 event_text = "events" if successful_saves > 1 else "event"
-                 final_message = f"Successfully opened {successful_saves} {event_text}!"
-            elif successful_saves > 0:
-                 final_message = f"Opened {successful_saves}/{len(ics_strings)} events. Some errors occurred."
-            else:
-                 final_message = "Error: Failed to open any event files."
-                 
-            self.update_status_signal.emit(final_message)
+                # 2. Ask Launch-Services (or equivalent) to open it
+                if sys.platform == "darwin":
+                    # Use Popen, don't wait, don't capture output, let default handler open it
+                    print(f"DEBUG: Using Popen for: open {temp_path}")
+                    subprocess.Popen(["open", temp_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    successful_import_initiated = True
+                elif sys.platform.startswith("win"):
+                    print(f"DEBUG: Using os.startfile for {temp_path}")
+                    os.startfile(temp_path) # type: ignore
+                    print(f"DEBUG: os.startfile finished.") # Note: This happens immediately, not after import
+                    successful_import_initiated = True
+                else: # Assume Linux/other POSIX
+                    # Keep xdg-open but use Popen for consistency
+                    command = ["xdg-open", temp_path]
+                    print(f"DEBUG: Using Popen for: {' '.join(command)}")
+                    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    successful_import_initiated = True
 
-            # Clear the text input and reset image area if needed
-            self.clear_input_signal.emit()
-            # Assuming image_area has a method to clear/reset
-            if hasattr(self.image_area, 'reset_state'):
-                 # Use QTimer.singleShot to ensure it runs on the main thread
-                 QTimer.singleShot(0, self.image_area.reset_state)
+                # 3. Schedule deletion on the GUI thread much later
+                if temp_path and successful_import_initiated:
+                    print(f"DEBUG: Scheduling deletion of {temp_path} in 60 seconds via main thread.")
+                    # Use invokeMethod to call the scheduling method on the main thread
+                    QMetaObject.invokeMethod(
+                        self,
+                        "_schedule_temp_file_deletion",
+                        Qt.ConnectionType.QueuedConnection,
+                        Q_ARG(str, temp_path) # Wrap argument with Q_ARG
+                    )
+
+            except FileNotFoundError:
+                self.update_status_signal.emit("Error: Could not create temporary event file.")
+                print("Error: Failed to create temp event file.")
+                # Ensure temp_path is cleaned up if creation failed mid-way (though unlikely with NamedTemporaryFile context)
+                if temp_path and os.path.exists(temp_path):
+                    try: os.unlink(temp_path)
+                    except OSError: pass # Ignore cleanup error if creation failed
+            except OSError as os_err:
+                # Error could be from os.startfile or Popen if command not found
+                self.update_status_signal.emit(f"Error: Could not open event file: {os_err}")
+                print(f"Error initiating open for {temp_path}: {os_err}")
+                # Clean up if opening failed
+                if temp_path and os.path.exists(temp_path):
+                    try: os.unlink(temp_path)
+                    except OSError: pass
+            # Remove CalledProcessError handler as Popen doesn't raise it directly here
+            # except subprocess.CalledProcessError as proc_err: ...
+            except Exception as e:
+                self.update_status_signal.emit(f"Unexpected error processing event file: {e}")
+                print(f"Unexpected error with temp file {temp_path}: {e}")
+                # Clean up on generic error
+                if temp_path and os.path.exists(temp_path):
+                    try: os.unlink(temp_path)
+                    except OSError: pass
+            finally:
+                # File cleanup is now handled by the main thread via the scheduled timer
+                pass # No immediate cleanup needed here anymore
+
+            # Final status update
+            if successful_import_initiated:
+                self.update_status_signal.emit(f"Successfully initiated import for {event_count} {event_text}!")
+                self.clear_input_signal.emit()
+                if hasattr(self.image_area, 'reset_state'):
+                    QTimer.singleShot(0, self.image_area.reset_state)
+            # Error status is handled by emitted signals within the try/except blocks
 
         except Exception as e:
-            # Catch errors from the API call itself or if ics_strings was None
             error_message = f"Error creating events: {str(e)}"
-            print(f"Error in _create_event_thread: {e}") # Log the full error
-            self.update_status_signal.emit(error_message) 
-            # Show error dialog on the main thread
-            # Pass the simplified error message to the user
-            QTimer.singleShot(0, lambda: self._show_error(error_message)) 
+            print(f"Error in _create_event_thread: {e}")
+            self.update_status_signal.emit(error_message)
+            QTimer.singleShot(0, lambda: self._show_error(error_message))
         finally:
-            # Ensure UI is re-enabled regardless of success or failure
             self.enable_ui_signal.emit(True)
+
+    @pyqtSlot(str) # Decorate as a slot invokable via invokeMethod
+    def _schedule_temp_file_deletion(self, file_path: str):
+        """Schedules the deletion of the temp file from the main GUI thread."""
+        print(f"DEBUG: Main thread received request to schedule deletion for {file_path}")
+        # This QTimer.singleShot is now called safely from the main thread
+        QTimer.singleShot(60_000, lambda p=file_path: self._delete_temp_file(p))
+
+    def _delete_temp_file(self, file_path: str):
+        """Actually deletes the temp file, handling potential errors."""
+        try:
+            print(f"DEBUG: Main thread attempting to delete {file_path}")
+            Path(file_path).unlink(missing_ok=True)
+            print(f"DEBUG: Main thread successfully deleted {file_path}")
+        except OSError as e:
+            print(f"Warning: Main thread failed to delete temp file {file_path}: {e}")
+        except Exception as e:
+            print(f"Warning: Unexpected error deleting temp file {file_path} from main thread: {e}")
 
     def _show_error(self, message: str):
         """Show error message box (called from main thread)"""
