@@ -17,6 +17,7 @@ from pathlib import Path
 import tempfile
 import subprocess
 from string import Formatter
+import uuid # Import uuid
 
 # Import the CalendarAPIClient from the new module
 from api_client import CalendarAPIClient
@@ -656,13 +657,22 @@ class NLCalendarCreator(QMainWindow):
 
             # --- Assemble the combined ICS content CORRECTLY ---
             combined_vevents = []
+            
+            # Helper function to ensure a unique UID for each VEVENT
+            def _force_new_uid(vevent: str) -> str:
+                new_uid = f"{uuid.uuid4()}@nl-calendar"
+                # replace the first UID:… line (RFC5545 §3.8.4.7)
+                # Use re.IGNORECASE just in case the API returns 'uid:' instead of 'UID:'
+                return re.sub(r"^UID:.*$", f"UID:{new_uid}", vevent, count=1, flags=re.MULTILINE | re.IGNORECASE)
+
             for i, single_ics in enumerate(ics_strings):
                 # Extract content between BEGIN:VEVENT and END:VEVENT
-                match = re.search(r"BEGIN:VEVENT(.*?)END:VEVENT", single_ics, re.DOTALL)
+                match = re.search(r"BEGIN:VEVENT(.*?)END:VEVENT", single_ics, re.DOTALL | re.IGNORECASE) # Added IGNORECASE here too for robustness
                 if match:
                     vevent_content = match.group(0) # Includes BEGIN/END VEVENT
-                    combined_vevents.append(vevent_content)
-                    print(f"DEBUG: Extracted VEVENT {i+1}")
+                    # Ensure a unique UID before appending
+                    combined_vevents.append(_force_new_uid(vevent_content))
+                    print(f"DEBUG: Extracted and processed VEVENT {i+1} with new UID.")
                 else:
                     print(f"Warning: Could not extract VEVENT from ICS string {i+1}:\n{single_ics[:200]}...")
             
@@ -674,11 +684,13 @@ class NLCalendarCreator(QMainWindow):
                 "BEGIN:VCALENDAR\r\n"
                 "VERSION:2.0\r\n"
                 "PRODID:-//NL Calendar Creator//EN\r\n"
+                # Optional: Add CALSCALE as suggested for robustness
+                "CALSCALE:GREGORIAN\r\n"
                 + "\r\n".join(combined_vevents) +  # Join extracted VEVENT blocks with CRLF
                 "\r\nEND:VCALENDAR"
             )
             
-            print(f"DEBUG: Final combined ICS content (first 500 chars):\n------\n{final_ics_content[:500]}\n------")
+            print(f"DEBUG: Final combined ICS content (first 10000 chars):\n------\n{final_ics_content[:10000]}\n------")
 
             # --- Create, open, and clean up the single temp file ---
             temp_path: Optional[str] = None # Explicitly define type
