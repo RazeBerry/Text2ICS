@@ -1,2 +1,7 @@
 PyQt6>=6.0.0
 anthropic>=0.9.0
+google-generativeai>=0.3.0
+icalendar>=5.0.0
+pytz>=2023.3
+python-dateutil>=2.8.0
+tzlocal>=4.0

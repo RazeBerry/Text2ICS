@@ -1,13 +1,13 @@
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
                            QProgressBar, QHBoxLayout, QSizePolicy)
 from PyQt6.QtGui import QKeySequence, QShortcut, QIcon, QDragEnterEvent, QDropEvent, QPixmap, QPainter, QBrush, QColor
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QMetaObject, QEasingCurve, QMimeData, QBuffer, pyqtSlot, Q_ARG
 import time
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import random
 import threading
 import re
@@ -18,6 +18,8 @@ import tempfile
 import subprocess
 from string import Formatter
 import uuid # Import uuid
+import dateutil.parser
+from dateutil.relativedelta import relativedelta
 
 # Import the CalendarAPIClient from the new module
 from api_client import CalendarAPIClient
@@ -26,16 +28,78 @@ from api_client import CalendarAPIClient
 os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"  # Proper HiDPI support
 os.environ["QT_API"] = "pyqt6"  # Explicitly request PyQt6
 
-# Add specific styling constants (optional, but good practice)
-BORDER_RADIUS = "12px"
-PANEL_BACKGROUND = "#FFFFFF" # Assuming the panels are on a white background in the image
-TEXT_COLOR_PRIMARY = "#000000" # Black for main text
-TEXT_COLOR_SECONDARY = "#8A8A8E" # Gray for subtitles, detected info
-TEXT_COLOR_PLACEHOLDER = "#C7C7CC" # Lighter gray for placeholders
-BUTTON_COLOR = "#007AFF" # Apple blue
-BUTTON_HOVER_COLOR = "#006EE6"
-BORDER_COLOR_LIGHT = "#E5E5EA"
-BORDER_COLOR_DASHED = "#C7C7CC"
+# Apple Design System - Proper Typography Scale
+TYPOGRAPHY_SCALE = {
+    "title": {
+        "size": "28px", 
+        "weight": "600", 
+        "line_height": "1.2", 
+        "letter_spacing": "-0.02em"
+    },
+    "headline": {
+        "size": "17px", 
+        "weight": "600", 
+        "line_height": "1.3"
+    },
+    "body": {
+        "size": "15px", 
+        "weight": "400", 
+        "line_height": "1.4"
+    },
+    "caption": {
+        "size": "13px", 
+        "weight": "400", 
+        "line_height": "1.3"
+    },
+    "footnote": {
+        "size": "11px", 
+        "weight": "400", 
+        "line_height": "1.2"
+    }
+}
+
+# Apple Design System - 8pt Grid Spacing
+SPACING_SCALE = {
+    "xs": "8px",    # 1 unit
+    "sm": "16px",   # 2 units  
+    "md": "24px",   # 3 units
+    "lg": "32px",   # 4 units
+    "xl": "48px",   # 6 units
+    "xxl": "64px"   # 8 units
+}
+
+# Apple Design System - Semantic Colors
+COLORS = {
+    "text_primary": "#000000",
+    "text_secondary": "#8A8A8E", 
+    "text_tertiary": "#C7C7CC",
+    "text_placeholder": "#C7C7CC",
+    "background_primary": "#FFFFFF",
+    "background_secondary": "#F2F2F7",
+    "background_tertiary": "#FFFFFF",
+    "border_light": "#E5E5EA",
+    "border_medium": "#D1D1D6",
+    "accent_blue": "#007AFF",
+    "accent_blue_hover": "#0056CC",
+    "accent_blue_pressed": "#004499",
+    "accent_blue_disabled": "#B0B0B0",
+    "success_green": "#30D158",
+    "warning_orange": "#FF9F0A",
+    "error_red": "#FF3B30"
+}
+
+# Design tokens
+BORDER_RADIUS = {
+    "sm": "8px",
+    "md": "12px", 
+    "lg": "16px"
+}
+
+SHADOW = {
+    "sm": "0 1px 3px rgba(0, 0, 0, 0.1)",
+    "md": "0 4px 6px rgba(0, 0, 0, 0.1)",
+    "lg": "0 10px 25px rgba(0, 0, 0, 0.1)"
+}
 
 class ImageAttachmentArea(QLabel):
     """Custom widget for handling image drag and drop"""
@@ -46,19 +110,20 @@ class ImageAttachmentArea(QLabel):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumHeight(100)
-        self.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #3F3F3F;
-                border-radius: 8px;
-                padding: 12px;
-                background-color: #2D2D2D;
-                color: #86868B;
-            }
-            QLabel:hover {
-                border-color: #0A84FF;
-                background-color: #363636;
-            }
+        self.setMinimumHeight(int(SPACING_SCALE["xxl"].replace("px", "")))
+        self.setStyleSheet(f"""
+            QLabel {{
+                border: 2px dashed {COLORS['border_medium']};
+                border-radius: {BORDER_RADIUS["md"]};
+                padding: {SPACING_SCALE["md"]};
+                background-color: {COLORS['background_secondary']};
+                color: {COLORS['text_tertiary']};
+                font-size: {TYPOGRAPHY_SCALE["body"]["size"]};
+            }}
+            QLabel:hover {{
+                border-color: {COLORS['accent_blue']};
+                background-color: {COLORS['background_tertiary']};
+            }}
         """)
         self.reset_state()
 
@@ -174,21 +239,21 @@ class ImageAttachmentArea(QLabel):
         self.setText(f"{preview_text}{secondary_text}")
         
         # Update styling to make it more noticeable
-        self.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #0A84FF;  /* Change border to blue */
-                border-radius: 8px;
-                padding: 12px;
-                background-color: rgba(10, 132, 255, 0.1);  /* Light blue background */
-                color: #FFFFFF;  /* Brighter text */
-                font-weight: bold;  /* Make text bold */
-                font-size: 14px;  /* Slightly larger font */
-                line-height: 1.4;
-            }
-            QLabel:hover {
-                border-color: #0A84FF;
-                background-color: rgba(10, 132, 255, 0.15);
-            }
+        self.setStyleSheet(f"""
+            QLabel {{
+                border: 2px dashed {COLORS['accent_blue']};  /* Change border to blue */
+                border-radius: {BORDER_RADIUS["md"]};
+                padding: {SPACING_SCALE["md"]};
+                background-color: rgba(0, 122, 255, 0.1);  /* Light blue background */
+                color: {COLORS['text_primary']};  /* Brighter text */
+                font-weight: {TYPOGRAPHY_SCALE["body"]["weight"]};  /* Make text bold */
+                font-size: {TYPOGRAPHY_SCALE["body"]["size"]};  /* Slightly larger font */
+                line-height: {TYPOGRAPHY_SCALE["body"]["line_height"]};
+            }}
+            QLabel:hover {{
+                border-color: {COLORS['accent_blue']};
+                background-color: rgba(0, 122, 255, 0.15);
+            }}
         """)
 
 
@@ -261,6 +326,11 @@ class NLCalendarCreator(QMainWindow):
         self.setMinimumSize(600, 450) # Adjusted minimum size
         self.resize(700, 500) # Default size
 
+        # Initialize preview references
+        self.preview_event_title = None
+        self.preview_date = None  
+        self.preview_time = None
+
         # --- Main Container Widget ---
         # Use a QWidget as the central widget for easier styling control
         main_container = QWidget(self)
@@ -268,7 +338,7 @@ class NLCalendarCreator(QMainWindow):
         main_container.setStyleSheet(f"""
             #mainContainer {{
                 background-color: #F2F2F7; /* Light gray background like the image */
-                border-radius: {BORDER_RADIUS};
+                border-radius: {BORDER_RADIUS["md"]};
                 /* No border needed here if the window itself is frameless/styled */
             }}
             QLabel {{
@@ -280,20 +350,25 @@ class NLCalendarCreator(QMainWindow):
         # --- Overall Layout ---
         # Use a single QVBoxLayout for the main container
         outer_layout = QVBoxLayout(main_container)
-        outer_layout.setContentsMargins(30, 20, 30, 20) # Add padding around everything
-        outer_layout.setSpacing(15) # Spacing between sections
+        outer_layout.setContentsMargins(
+            int(SPACING_SCALE["lg"].replace("px", "")), 
+            int(SPACING_SCALE["md"].replace("px", "")), 
+            int(SPACING_SCALE["lg"].replace("px", "")), 
+            int(SPACING_SCALE["md"].replace("px", ""))
+        ) # Follow 8pt grid: 32, 24, 32, 24
+        outer_layout.setSpacing(int(SPACING_SCALE["md"].replace("px", ""))) # 24px spacing between sections
 
         # --- 1. Top Title/Subtitle Section ---
         title_layout = QVBoxLayout()
-        title_layout.setSpacing(4)
-        title_layout.setContentsMargins(0, 0, 0, 10) # Margin below title section
+        title_layout.setSpacing(int(SPACING_SCALE["xs"].replace("px", ""))) # 8px between title and subtitle
+        title_layout.setContentsMargins(0, 0, 0, int(SPACING_SCALE["sm"].replace("px", ""))) # 16px margin below title section
 
         title_label = QLabel("Create a Calendar Event")
         title_label.setStyleSheet(f"""
             QLabel {{
-                font-size: 24px; /* Larger font */
-                font-weight: 600; /* Semibold */
-                color: {TEXT_COLOR_PRIMARY};
+                font-size: {TYPOGRAPHY_SCALE["title"]["size"]}; /* Larger font */
+                font-weight: {TYPOGRAPHY_SCALE["title"]["weight"]}; /* Semibold */
+                color: {COLORS["text_primary"]};
                 qproperty-alignment: 'AlignCenter';
             }}
         """)
@@ -301,8 +376,8 @@ class NLCalendarCreator(QMainWindow):
         subtitle_label = QLabel("Type freely or drop a photo. We'll do the rest.")
         subtitle_label.setStyleSheet(f"""
             QLabel {{
-                font-size: 14px;
-                color: {TEXT_COLOR_SECONDARY};
+                font-size: {TYPOGRAPHY_SCALE["body"]["size"]};
+                color: {COLORS["text_secondary"]};
                 qproperty-alignment: 'AlignCenter';
             }}
         """)
@@ -313,18 +388,18 @@ class NLCalendarCreator(QMainWindow):
 
         # --- 2. Main Content Area (Horizontal Split) ---
         content_layout = QHBoxLayout()
-        content_layout.setSpacing(25) # Spacing between the two columns
+        content_layout.setSpacing(int(SPACING_SCALE["lg"].replace("px", ""))) # 32px spacing between the two columns
 
         # --- 2a. Left Panel: Event Details ---
         left_panel_layout = QVBoxLayout()
-        left_panel_layout.setSpacing(15)
+        left_panel_layout.setSpacing(int(SPACING_SCALE["sm"].replace("px", ""))) # 16px spacing between elements
 
         event_details_title = QLabel("Event Details")
         event_details_title.setStyleSheet(f"""
             QLabel {{
-                font-size: 16px;
-                font-weight: 600;
-                color: {TEXT_COLOR_PRIMARY};
+                font-size: {TYPOGRAPHY_SCALE["headline"]["size"]};
+                font-weight: {TYPOGRAPHY_SCALE["headline"]["weight"]};
+                color: {COLORS["text_primary"]};
             }}
         """)
         left_panel_layout.addWidget(event_details_title)
@@ -335,36 +410,71 @@ class NLCalendarCreator(QMainWindow):
         example_input_container.setObjectName("exampleInputContainer")
         example_input_container.setStyleSheet(f"""
             #exampleInputContainer {{
-                background-color: {PANEL_BACKGROUND};
-                border: 1px solid {BORDER_COLOR_LIGHT};
-                border-radius: 8px;
+                background-color: {COLORS["background_primary"]};
+                border: 1px solid {COLORS["border_light"]};
+                border-radius: {BORDER_RADIUS["md"]};
                 padding: 0px;
             }}
         """)
         example_input_layout = QVBoxLayout(example_input_container)
-        example_input_layout.setContentsMargins(12, 8, 12, 8) # Adjusted inner margins
-        example_input_layout.setSpacing(6) # Better spacing inside the container
+        example_input_layout.setContentsMargins(
+            int(SPACING_SCALE["sm"].replace("px", "")), 
+            int(SPACING_SCALE["sm"].replace("px", "")), 
+            int(SPACING_SCALE["sm"].replace("px", "")), 
+            int(SPACING_SCALE["sm"].replace("px", ""))
+        ) # 16px margins all around
+        example_input_layout.setSpacing(int(SPACING_SCALE["xs"].replace("px", ""))) # 8px spacing inside the container
 
         # Replace QLabel with an actual editable QTextEdit for input
         self.text_input = QTextEdit()
         self.text_input.setPlaceholderText("e.g. Dinner with Mia at Balthasar next Friday 7:30pm") # Keep multiline placeholder
         self.text_input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.text_input.setAcceptRichText(False) # Explicitly disable rich text input
+        self.text_input.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.text_input.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        # Set fixed size policies to prevent resizing behavior
+        self.text_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.text_input.setFixedHeight(96) # Fixed height in pixels instead of calculation
+        self.text_input.setMaximumHeight(96) # Ensure it never grows beyond this
+        self.text_input.setMinimumHeight(96) # Ensure it never shrinks below this
+        
         self.text_input.setStyleSheet(f"""
             QTextEdit {{
-                color: {TEXT_COLOR_PRIMARY};
-                background-color: transparent; /* Keep transparent to blend with container */
-                border: none; /* No border on the text edit itself */
-                font-size: 14px;
-                padding: 4px 0px; /* Minimal padding */
+                color: {COLORS["text_primary"]};
+                background-color: transparent;
+                border: none;
+                font-size: {TYPOGRAPHY_SCALE["body"]["size"]};
+                line-height: {TYPOGRAPHY_SCALE["body"]["line_height"]};
+                padding: {SPACING_SCALE["xs"]} 0px;
             }}
             QTextEdit:focus {{
                 border: none;
-                outline: none; /* Remove focus outline */
+                outline: none;
+                background-color: transparent;
+            }}
+            QScrollBar:vertical {{
+                background: {COLORS["background_secondary"]};
+                width: 8px;
+                border-radius: 4px;
+                margin: 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {COLORS["border_medium"]};
+                border-radius: 4px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {COLORS["text_tertiary"]};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none;
+                background: none;
             }}
         """)
-        # Adjust height slightly - might need tweaking based on font/padding
-        self.text_input.setFixedHeight(100) # Increased height
+        
+        # Connect text changes to live preview update
+        self.text_input.textChanged.connect(self.update_live_preview)
 
         # Add only the text input widget to the layout
         example_input_layout.addWidget(self.text_input)
@@ -373,13 +483,12 @@ class NLCalendarCreator(QMainWindow):
 
 
         # --- Preview Area ---
-        preview_title = QLabel("This is what we'll create in\nyour calendar")
-        preview_title.setWordWrap(True)
+        preview_title = QLabel("This is what we'll create in your calendar")
         preview_title.setStyleSheet(f"""
             QLabel {{
-                font-size: 13px;
-                color: {TEXT_COLOR_SECONDARY};
-                margin-top: 5px; /* Space above preview */
+                font-size: {TYPOGRAPHY_SCALE["caption"]["size"]};
+                color: {COLORS["text_secondary"]};
+                margin-top: {SPACING_SCALE["xs"]}; /* 8px space above preview */
             }}
         """)
         left_panel_layout.addWidget(preview_title)
@@ -388,42 +497,37 @@ class NLCalendarCreator(QMainWindow):
         preview_container.setObjectName("previewContainer")
         preview_container.setStyleSheet(f"""
              #previewContainer {{
-                 background-color: {PANEL_BACKGROUND};
-                 border: 1px solid {BORDER_COLOR_LIGHT};
-                 border-radius: 8px;
-                 padding: 10px 12px; /* Slightly less padding */
+                 background-color: {COLORS["background_primary"]};
+                 border: 1px solid {COLORS["border_light"]};
+                 border-radius: {BORDER_RADIUS["lg"]}; /* More rounded corners */
+                 padding: {SPACING_SCALE["sm"]} {SPACING_SCALE["md"]}; /* 16px vertical, 24px horizontal */
              }}
          """)
-        preview_layout = QHBoxLayout(preview_container) # Horizontal layout for preview
+        preview_layout = QVBoxLayout(preview_container) # Changed to vertical layout for cleaner single line
         preview_layout.setContentsMargins(0,0,0,0)
-        preview_layout.setSpacing(10)
+        preview_layout.setSpacing(int(SPACING_SCALE["xs"].replace("px", ""))) # 8px spacing between elements
 
-        preview_event_title = QLabel("Dinner with Mia")
-        preview_event_title.setStyleSheet(f"color: {TEXT_COLOR_PRIMARY}; font-size: 14px; font-weight: 500;")
+        # Single line preview with all info
+        self.preview_event_title = QLabel("Event title • Date • Time")
+        self.preview_event_title.setStyleSheet(f"color: {COLORS['text_tertiary']}; font-size: {TYPOGRAPHY_SCALE['body']['size']}; font-weight: {TYPOGRAPHY_SCALE['body']['weight']};")
+        self.preview_event_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        preview_date = QLabel("Mar 30")
-        preview_date.setStyleSheet(f"color: {TEXT_COLOR_SECONDARY}; font-size: 13px;")
-
-        preview_time = QLabel("7:30 PM–9:00 PM")
-        preview_time.setStyleSheet(f"color: {TEXT_COLOR_SECONDARY}; font-size: 13px;")
-
-        preview_layout.addWidget(preview_event_title, 1) # Title takes available space
-        preview_layout.addWidget(preview_date)
-        preview_layout.addWidget(preview_time)
+        # Remove the separate date and time labels - we'll combine everything into one line
+        preview_layout.addWidget(self.preview_event_title)
 
         left_panel_layout.addWidget(preview_container)
         left_panel_layout.addStretch(1) # Push content up
 
         # --- 2b. Right Panel: Photo Attachments ---
         right_panel_layout = QVBoxLayout()
-        right_panel_layout.setSpacing(15)
+        right_panel_layout.setSpacing(int(SPACING_SCALE["sm"].replace("px", ""))) # 16px spacing between elements
 
         photo_title = QLabel("Photo Attachments")
         photo_title.setStyleSheet(f"""
             QLabel {{
-                font-size: 16px;
-                font-weight: 600;
-                color: {TEXT_COLOR_PRIMARY};
+                font-size: {TYPOGRAPHY_SCALE["headline"]["size"]};
+                font-weight: {TYPOGRAPHY_SCALE["headline"]["weight"]};
+                color: {COLORS["text_primary"]};
             }}
         """)
         right_panel_layout.addWidget(photo_title)
@@ -436,17 +540,16 @@ class NLCalendarCreator(QMainWindow):
         self.image_area.setWordWrap(True)
         self.image_area.setStyleSheet(f"""
             QLabel {{
-                border: 2px dashed {BORDER_COLOR_DASHED};
-                border-radius: 8px;
-                padding: 12px;
-                background-color: {PANEL_BACKGROUND}; /* Match other panels */
-                color: {TEXT_COLOR_PLACEHOLDER}; /* Placeholder text color */
-                font-size: 14px;
-                min-height: 150px; /* Ensure it has some height */
+                border: 2px dashed {COLORS['border_medium']};
+                border-radius: {BORDER_RADIUS["md"]};
+                padding: {SPACING_SCALE["md"]};
+                background-color: {COLORS['background_secondary']};
+                color: {COLORS['text_tertiary']};
+                font-size: {TYPOGRAPHY_SCALE["body"]["size"]};
             }}
             QLabel:hover {{
-                border-color: {BUTTON_COLOR}; /* Blue highlight on hover */
-                background-color: #F7F7FC; /* Slightly different background on hover */
+                border-color: {COLORS['accent_blue']};
+                background-color: {COLORS['background_tertiary']};
             }}
         """)
         # Make image area take available vertical space
@@ -469,23 +572,27 @@ class NLCalendarCreator(QMainWindow):
         self.create_button.setMinimumWidth(150) # Give it some width
         self.create_button.setStyleSheet(f"""
             QPushButton {{
-                background-color: {BUTTON_COLOR};
+                background-color: {COLORS['accent_blue']};
                 color: white;
                 border: none;
-                border-radius: 8px; /* Slightly more rounded */
-                padding: 10px 24px;
-                font-size: 16px; /* Slightly larger font */
-                font-weight: 500; /* Medium weight */
+                border-radius: {BORDER_RADIUS["md"]}; 
+                padding: {SPACING_SCALE["md"]} {SPACING_SCALE["xl"]};
+                font-size: {TYPOGRAPHY_SCALE["body"]["size"]}; 
+                font-weight: 600; /* Semi-bold for better accessibility */
+                box-shadow: {SHADOW["sm"]};
             }}
             QPushButton:hover {{
-                background-color: {BUTTON_HOVER_COLOR};
+                background-color: {COLORS['accent_blue_hover']};
+                transform: translateY(-1px); /* Subtle lift effect */
             }}
             QPushButton:pressed {{
-                background-color: #005AB3; /* Darker pressed state */
+                background-color: {COLORS['accent_blue_pressed']};
+                transform: translateY(0px); /* Reset lift on press */
             }}
             QPushButton:disabled {{
-                background-color: #BDBDBD; /* Gray out when disabled */
-                color: #757575;
+                background-color: {COLORS['accent_blue_disabled']};
+                color: {COLORS['text_tertiary']};
+                box-shadow: none;
             }}
         """)
         button_layout.addWidget(self.create_button)
@@ -518,7 +625,7 @@ class NLCalendarCreator(QMainWindow):
         self.overlay.setStyleSheet(f"""
             #overlayWidget {{
                 background-color: rgba(242, 242, 247, 0.85); /* Semi-transparent background */
-                border-radius: {BORDER_RADIUS}; /* Match parent container */
+                border-radius: {BORDER_RADIUS["md"]}; /* Match parent container */
             }}
         """)
         self.overlay.hide()
@@ -531,13 +638,13 @@ class NLCalendarCreator(QMainWindow):
         self.processing_label = QLabel("Processing...") # Simple text
         self.processing_label.setStyleSheet(f"""
             QLabel {{
-                color: {TEXT_COLOR_PRIMARY};
-                font-size: 16px;
-                font-weight: 500;
-                padding: 15px 30px;
+                color: {COLORS['text_primary']};
+                font-size: {TYPOGRAPHY_SCALE["caption"]["size"]};
+                font-weight: {TYPOGRAPHY_SCALE["caption"]["weight"]};
+                padding: {SPACING_SCALE["md"]} {SPACING_SCALE["lg"]};
                 background-color: rgba(255, 255, 255, 0.7); /* White-ish box */
-                border-radius: 10px;
-                border: 1px solid {BORDER_COLOR_LIGHT};
+                border-radius: {BORDER_RADIUS["md"]};
+                border: 1px solid {COLORS['border_light']};
             }}
         """)
         self.processing_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -582,6 +689,7 @@ class NLCalendarCreator(QMainWindow):
     def _clear_input(self):
          # Clear the actual input method
          self.text_input.clear()
+         # This will trigger the textChanged signal and reset the preview via update_live_preview()
 
     def process_event(self):
         """Process the natural language input and create calendar event"""
@@ -798,6 +906,176 @@ class NLCalendarCreator(QMainWindow):
     def _show_error(self, message: str):
         """Show error message box (called from main thread)"""
         QMessageBox.critical(self, "Error", message)
+
+    def update_live_preview(self):
+        """Update preview in real-time as user types"""
+        text = self.text_input.toPlainText().strip()
+        
+        if not text:
+            # Reset to placeholder state
+            self.preview_event_title.setText("Event title • Date • Time")
+            self.preview_event_title.setStyleSheet(f"color: {COLORS['text_tertiary']}; font-size: {TYPOGRAPHY_SCALE['body']['size']}; font-weight: {TYPOGRAPHY_SCALE['body']['weight']};")
+            return
+
+        # Parse the text and extract information
+        parsed_info = self.parse_event_text(text)
+        
+        # Build single line preview
+        preview_parts = []
+        
+        # Add title
+        if parsed_info['title']:
+            preview_parts.append(parsed_info['title'])
+        else:
+            # Extract first few words as potential title
+            words = text.split()[:4]
+            potential_title = ' '.join(words) + ('...' if len(text.split()) > 4 else '')
+            preview_parts.append(potential_title)
+        
+        # Add date
+        if parsed_info['date']:
+            preview_parts.append(parsed_info['date'])
+        else:
+            preview_parts.append("Date")
+            
+        # Add time
+        if parsed_info['time']:
+            preview_parts.append(parsed_info['time'])
+        else:
+            preview_parts.append("Time")
+        
+        # Combine with bullet separator
+        preview_text = " • ".join(preview_parts)
+        
+        # Update the single preview label
+        self.preview_event_title.setText(preview_text)
+        
+        # Style based on whether we have real content or placeholders
+        has_real_content = parsed_info['title'] or parsed_info['date'] or parsed_info['time']
+        if has_real_content:
+            self.preview_event_title.setStyleSheet(f"color: {COLORS['text_primary']}; font-size: {TYPOGRAPHY_SCALE['body']['size']}; font-weight: {TYPOGRAPHY_SCALE['body']['weight']};")
+        else:
+            self.preview_event_title.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: {TYPOGRAPHY_SCALE['body']['size']}; font-weight: {TYPOGRAPHY_SCALE['body']['weight']};")
+
+    def parse_event_text(self, text: str) -> Dict[str, Optional[str]]:
+        """Parse natural language text to extract event information"""
+        result = {
+            'title': None,
+            'date': None,
+            'time': None,
+            'location': None
+        }
+        
+        text_lower = text.lower()
+        
+        # Extract time patterns
+        time_patterns = [
+            r'(\d{1,2}:\d{2}\s*(?:am|pm))',  # 7:30pm, 7:30 pm
+            r'(\d{1,2}\s*(?:am|pm))',       # 7pm, 7 pm
+            r'(\d{1,2}:\d{2})',             # 24-hour format 19:30
+        ]
+        
+        for pattern in time_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                result['time'] = match.group(1).strip()
+                break
+        
+        # Extract date patterns
+        date_patterns = [
+            r'(next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))',
+            r'(this\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))',
+            r'((?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))',
+            r'(tomorrow)',
+            r'(today)',
+            r'(next week)',
+            r'(this week)',
+            r'(\d{1,2}/\d{1,2})',           # 3/15, 03/15
+            r'(\d{1,2}-\d{1,2})',           # 3-15, 03-15
+            r'((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2})',  # Mar 30, March 30
+        ]
+        
+        for pattern in date_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                date_str = match.group(1).strip()
+                result['date'] = self.format_date_display(date_str)
+                break
+        
+        # Extract potential title by removing date/time/common location words
+        title_text = text
+        if result['time']:
+            title_text = re.sub(re.escape(result['time']), '', title_text, flags=re.IGNORECASE).strip()
+        
+        # Remove common date expressions
+        date_remove_patterns = [
+            r'\b(?:next|this)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b',
+            r'\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b',
+            r'\b(?:tomorrow|today)\b',
+            r'\b(?:next|this)\s+week\b',
+            r'\d{1,2}/\d{1,2}',
+            r'\d{1,2}-\d{1,2}',
+            r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\b',
+        ]
+        
+        for pattern in date_remove_patterns:
+            title_text = re.sub(pattern, '', title_text, flags=re.IGNORECASE).strip()
+        
+        # Remove common prepositions and clean up
+        title_text = re.sub(r'\b(?:at|on|in|for|with)\s+', ' ', title_text, flags=re.IGNORECASE)
+        title_text = re.sub(r'\s+', ' ', title_text).strip()
+        
+        if title_text and len(title_text) > 2:
+            result['title'] = title_text
+        
+        return result
+
+    def format_date_display(self, date_str: str) -> str:
+        """Format date string for display in preview"""
+        try:
+            now = datetime.now()
+            date_str_lower = date_str.lower().strip()
+            
+            # Handle relative dates
+            if date_str_lower == 'today':
+                return now.strftime('%b %d')
+            elif date_str_lower == 'tomorrow':
+                tomorrow = now + timedelta(days=1)
+                return tomorrow.strftime('%b %d')
+            elif 'next week' in date_str_lower:
+                next_week = now + timedelta(weeks=1)
+                return next_week.strftime('%b %d')
+            elif 'this week' in date_str_lower:
+                return now.strftime('%b %d')
+            
+            # Handle day names
+            days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+            for i, day in enumerate(days):
+                if day in date_str_lower:
+                    # Find next occurrence of this day
+                    today_weekday = now.weekday()
+                    target_weekday = i
+                    days_ahead = target_weekday - today_weekday
+                    
+                    if 'next' in date_str_lower:
+                        days_ahead += 7
+                    elif days_ahead <= 0:  # This week but day has passed, assume next week
+                        days_ahead += 7
+                        
+                    target_date = now + timedelta(days=days_ahead)
+                    return target_date.strftime('%b %d')
+            
+            # Try to parse other date formats
+            try:
+                parsed_date = dateutil.parser.parse(date_str, fuzzy=True)
+                return parsed_date.strftime('%b %d')
+            except:
+                pass
+                
+        except Exception:
+            pass
+        
+        return date_str.title()  # Return as-is but capitalize
 
 
 if __name__ == '__main__':
