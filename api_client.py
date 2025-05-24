@@ -8,6 +8,9 @@ import uuid
 import pytz
 import textwrap
 from icalendar import Calendar, Event, vText, Alarm
+import re
+from dateutil import parser
+import tzlocal
 
 
 class CalendarAPIClient:
@@ -17,14 +20,24 @@ Follow these steps to extract event details and return them as a JSON array:
 
 1. Carefully parse the event details (text and any image context) to identify if multiple distinct events are described. If so, process each one separately.
 
-2. For each event, extract all relevant information such as event title, date, time, location, and description. If the event involves travel between different cities, be aware that the departure and arrival times may be in different time zones. Adjust the event times accordingly by converting them to UTC, ensuring accurate reflection of time differences. Employ a chain-of-thought process with reflection and verification to ensure proper handling of these time differences. If the end time or duration is not specified, estimate a reasonable duration (e.g., 1 hour for meetings, 2-3 hours for dinners) and calculate the `end_utc` accordingly.
+2. For each event, extract all relevant information such as event title, date, time, location, and description. 
+
+   **IMPORTANT TIME HANDLING**:
+   - Extract times EXACTLY as mentioned in the input (e.g., "3 PM", "19:30", "7:30pm")
+   - Do NOT attempt timezone conversions - preserve the original time as stated
+   - If a timezone is explicitly mentioned, include it in the time string
+   - If no timezone is specified, assume it's in the user's local timezone
+   - For relative dates like "tomorrow", "next Friday", calculate based on the provided current date
+   - If end time is not specified, estimate a reasonable duration (e.g., 1 hour for meetings, 2-3 hours for dinners)
 
 3. Return a **JSON array**, one object per event.
    Keys REQUIRED per event:
      - "uid"          : stable unique string (use UUID if needed, no @domain required)
      - "title"        : human title
-     - "start_utc"    : ISO-8601 UTC string, e.g., "2025-07-21T13:30:00Z"
-     - "end_utc"      : ISO-8601 UTC string, e.g., "2025-07-21T14:30:00Z"
+     - "start_time"   : time string as extracted (e.g., "7:30 PM", "19:30", "3:00 PM EST")
+     - "end_time"     : time string as extracted or estimated (e.g., "9:00 PM", "21:30")
+     - "date"         : date string (e.g., "2024-08-15", "March 30, 2024")
+     - "timezone"     : timezone if explicitly mentioned, otherwise "local"
      - "description"  : plain text (no special escaping needed)
      - "location"     : plain text address or venue name, or "" if none provided
 
@@ -34,18 +47,12 @@ Follow these steps to extract event details and return them as a JSON array:
      {
        "uid": "uuid-some-unique-id-1",
        "title": "Dinner with Mia",
-       "start_utc": "2024-08-15T19:30:00Z",
-       "end_utc": "2024-08-15T21:00:00Z",
+       "start_time": "7:30 PM",
+       "end_time": "9:00 PM",
+       "date": "2024-08-15",
+       "timezone": "local",
        "description": "Catch up dinner.",
        "location": "Balthasar Restaurant"
-     },
-     {
-       "uid": "uuid-some-unique-id-2",
-       "title": "Team Meeting",
-       "start_utc": "2024-08-16T10:00:00Z",
-       "end_utc": "2024-08-16T11:00:00Z",
-       "description": "Discuss project milestones.",
-       "location": "Office Conference Room B"
      }
    ]
    ```
@@ -60,6 +67,7 @@ Follow these steps to extract event details and return them as a JSON array:
 </event_description>
 
 Today's date is {day_name}, {formatted_date}.
+Current timezone: {user_timezone}
 """
 
     def __init__(self, api_key: str):
@@ -80,7 +88,7 @@ Today's date is {day_name}, {formatted_date}.
 
         # Validation layer: Ensure USER_PROMPT_TEMPLATE contains the required keys.
         template_keys = [fn for _, fn, _, _ in Formatter().parse(self.USER_PROMPT_TEMPLATE) if fn]
-        required_keys = {'event_description', 'day_name', 'formatted_date'}
+        required_keys = {'event_description', 'day_name', 'formatted_date', 'user_timezone'}
         assert set(template_keys) == required_keys, f"Template mismatch! Expected keys {required_keys} but got {set(template_keys)}"
 
         self.model = self.genai.GenerativeModel(
@@ -118,12 +126,16 @@ Today's date is {day_name}, {formatted_date}.
         current_date = datetime.now()
         day_name = current_date.strftime("%A")
         formatted_date = current_date.strftime("%B %d, %Y")
+        
+        # Get user's timezone
+        user_timezone = str(current_date.astimezone().tzinfo)
 
         # Build the dynamic prompt using the class-level USER_PROMPT_TEMPLATE.
         api_prompt = self.USER_PROMPT_TEMPLATE.format(
             event_description=event_description,
             day_name=day_name,
-            formatted_date=formatted_date
+            formatted_date=formatted_date,
+            user_timezone=user_timezone
         )
 
         for attempt in range(self.max_retries):
@@ -224,8 +236,6 @@ def build_ics_from_events(events: list[dict]) -> list[str]:
     out = []
     if not isinstance(events, list):
         print(f"Error: Expected a list of events, but got {type(events)}")
-        # Potentially raise an error or return empty list depending on desired handling
-        # For now, let's try to handle if it's a single dict wrapped unexpectedly
         if isinstance(events, dict):
              events = [events] # Try processing it as a single event list
         else:
@@ -234,7 +244,7 @@ def build_ics_from_events(events: list[dict]) -> list[str]:
     for i, ev in enumerate(events):
         try:
             # Basic validation of required keys
-            required_keys = {"uid", "title", "start_utc", "end_utc"}
+            required_keys = {"uid", "title", "start_time", "end_time", "date", "timezone"}
             if not required_keys.issubset(ev.keys()):
                 print(f"Warning: Skipping event {i+1} due to missing required keys ({required_keys - set(ev.keys())})")
                 continue
@@ -250,39 +260,67 @@ def build_ics_from_events(events: list[dict]) -> list[str]:
             ve.add("UID", uid)
 
             # Use current UTC time for DTSTAMP
-            ve.add("DTSTAMP", datetime.now(pytz.utc)) # Ensure DTSTAMP is timezone-aware (UTC)
+            ve.add("DTSTAMP", datetime.now(pytz.utc))
 
-            # Parse ISO 8601 strings for start/end times
-            # The .replace handles cases where 'Z' is present; fromisoformat needs timezone offset
+            # Parse date, time, and timezone properly
             try:
-                start_dt = datetime.fromisoformat(ev["start_utc"].replace("Z", "+00:00"))
-                end_dt = datetime.fromisoformat(ev["end_utc"].replace("Z", "+00:00"))
-            except ValueError as dt_err:
-                print(f"Warning: Skipping event '{ev.get('title', 'Unknown')}' due to invalid date format: {dt_err}")
+                # Parse the date first
+                event_date = parser.parse(ev["date"]).date()
+                
+                # Parse start and end times
+                start_time_str = ev["start_time"]
+                end_time_str = ev["end_time"]
+                
+                # Handle timezone
+                tz_str = ev.get("timezone", "local")
+                if tz_str == "local":
+                    # Use system timezone - handle both pytz and zoneinfo
+                    local_tz_obj = tzlocal.get_localzone()
+                    
+                    # Convert to pytz timezone for consistency
+                    if hasattr(local_tz_obj, 'zone'):
+                        # It's already a pytz timezone
+                        local_tz = local_tz_obj
+                    else:
+                        # It's a zoneinfo timezone, convert to pytz
+                        try:
+                            local_tz = pytz.timezone(str(local_tz_obj))
+                        except:
+                            # Fallback to UTC if conversion fails
+                            local_tz = pytz.utc
+                else:
+                    try:
+                        # Try to parse timezone (e.g., "EST", "PST", "America/New_York")
+                        local_tz = pytz.timezone(tz_str)
+                    except:
+                        # If timezone parsing fails, fall back to UTC
+                        print(f"Warning: Could not parse timezone '{tz_str}', using UTC")
+                        local_tz = pytz.utc
+                
+                # Parse times and combine with date
+                start_time = parser.parse(start_time_str).time()
+                end_time = parser.parse(end_time_str).time()
+                
+                # Combine date and time, then localize to the timezone
+                start_dt_naive = datetime.combine(event_date, start_time)
+                end_dt_naive = datetime.combine(event_date, end_time)
+                
+                # Localize to the specified timezone
+                start_dt = local_tz.localize(start_dt_naive)
+                end_dt = local_tz.localize(end_dt_naive)
+                
+                # Convert to UTC for storage
+                start_dt_utc = start_dt.astimezone(pytz.utc)
+                end_dt_utc = end_dt.astimezone(pytz.utc)
+                
+            except Exception as dt_err:
+                print(f"Warning: Skipping event '{ev.get('title', 'Unknown')}' due to date/time parsing error: {dt_err}")
                 continue
-            except KeyError as key_err:
-                 print(f"Warning: Skipping event '{ev.get('title', 'Unknown')}' due to missing date key: {key_err}")
-                 continue
 
-            # Add timezone info if naive (assume UTC if specified as such)
-            # Note: fromisoformat should handle the +00:00 offset correctly, making them aware.
-            # Localizing naive datetimes might be needed if the format was different.
-            # Let's ensure they are timezone aware, converting to UTC if necessary.
-            if start_dt.tzinfo is None:
-                 start_dt = pytz.utc.localize(start_dt)
-            else:
-                 start_dt = start_dt.astimezone(pytz.utc)
+            ve.add("DTSTART", start_dt_utc)
+            ve.add("DTEND", end_dt_utc)
 
-            if end_dt.tzinfo is None:
-                 end_dt = pytz.utc.localize(end_dt)
-            else:
-                 end_dt = end_dt.astimezone(pytz.utc)
-
-
-            ve.add("DTSTART", start_dt)
-            ve.add("DTEND", end_dt)
-
-            ve.add("SUMMARY", vText(str(ev.get("title", "No Title")))) # Use vText for proper escaping/folding
+            ve.add("SUMMARY", vText(str(ev.get("title", "No Title"))))
 
             location = ev.get("location")
             if location:
@@ -290,31 +328,25 @@ def build_ics_from_events(events: list[dict]) -> list[str]:
 
             description = ev.get("description")
             if description:
-                 # vText handles folding, direct assignment is generally sufficient.
-                 # textwrap might be redundant unless specific manual folding is needed.
                  ve.add("DESCRIPTION", vText(str(description)))
 
             # Add a 30-minute reminder (VALARM)
             alarm = Alarm()
             alarm.add("ACTION", "DISPLAY")
-            alarm.add("DESCRIPTION", "Reminder") # Standard description
-            alarm.add("TRIGGER", timedelta(minutes=-30)) # Relative trigger
+            alarm.add("DESCRIPTION", "Reminder")
+            alarm.add("TRIGGER", timedelta(minutes=-30))
             ve.add_component(alarm)
 
             cal.add_component(ve)
 
             # Generate ICS content and ensure CRLF line endings
             raw_ical = cal.to_ical()
-            # Ensure bytes are decoded correctly (icalendar outputs bytes)
             decoded_ical = raw_ical.decode("utf-8", errors="replace")
-            # Ensure CRLF endings (replace LF not preceded by CR, then replace standalone LF)
             crlf_ical = decoded_ical.replace("\r\n", "\n").replace("\n", "\r\n")
 
             out.append(crlf_ical)
 
         except Exception as build_err:
-            # Log error for the specific event but continue with others
             print(f"Error building ICS for event {i+1} ({ev.get('title', 'Unknown Title')}): {build_err}")
-            # Consider adding this faulty event's data to an error log / returning it separately
 
     return out 
