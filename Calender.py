@@ -595,11 +595,12 @@ class NLCalendarCreator(QMainWindow):
         preview_layout = QVBoxLayout(preview_container)
         preview_layout.setContentsMargins(
             int(SPACING_SCALE["sm"].replace("px", "")),
-            int(SPACING_SCALE["xs"].replace("px", "")),
+            int(SPACING_SCALE["sm"].replace("px", "")),
             int(SPACING_SCALE["sm"].replace("px", "")),
             int(SPACING_SCALE["sm"].replace("px", ""))
         )
         preview_layout.setSpacing(int(SPACING_SCALE["xs"].replace("px", "")))
+        preview_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Single line preview with all info
         self.preview_event_title = QLabel("Event title • Date • Time")
