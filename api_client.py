@@ -272,42 +272,69 @@ def build_ics_from_events(events: list[dict]) -> list[str]:
                 end_time_str = ev["end_time"]
                 
                 # Handle timezone
-                tz_str = ev.get("timezone", "local")
-                if tz_str == "local":
-                    # Use system timezone - handle both pytz and zoneinfo
+                tz_str_raw = ev.get("timezone", "local") or "local"
+
+                # Normalise to upper-case once for mapping look-up (but keep original for debug)
+                tz_upper = tz_str_raw.upper()
+
+                # Map common (and DST) abbreviations to canonical IANA zones that understand DST.
+                ABBR_TO_TZ = {
+                    # North America
+                    "EST": "America/New_York", "EDT": "America/New_York",
+                    "CST": "America/Chicago", "CDT": "America/Chicago",
+                    "MST": "America/Denver",  "MDT": "America/Denver",
+                    "PST": "America/Los_Angeles", "PDT": "America/Los_Angeles",
+                    # United Kingdom / Europe
+                    "GMT": "Europe/London", "BST": "Europe/London",
+                    "CET": "Europe/Paris",  "CEST": "Europe/Paris",
+                    "EET": "Europe/Athens", "EEST": "Europe/Athens",
+                    # Australia
+                    "AEST": "Australia/Sydney", "AEDT": "Australia/Sydney",
+                    # Asia
+                    "IST": "Asia/Kolkata",  # India (UTC+5:30 – no DST)
+                    # Fallback examples may be added as needed
+                }
+
+                if tz_upper == "LOCAL":
+                    # User's system zone (DST aware)
                     local_tz_obj = tzlocal.get_localzone()
-                    
-                    # Convert to pytz timezone for consistency
-                    if hasattr(local_tz_obj, 'zone'):
-                        # It's already a pytz timezone
-                        local_tz = local_tz_obj
-                    else:
-                        # It's a zoneinfo timezone, convert to pytz
-                        try:
-                            local_tz = pytz.timezone(str(local_tz_obj))
-                        except:
-                            # Fallback to UTC if conversion fails
-                            local_tz = pytz.utc
+                    tz_name = getattr(local_tz_obj, "zone", str(local_tz_obj))
                 else:
-                    try:
-                        # Try to parse timezone (e.g., "EST", "PST", "America/New_York")
-                        local_tz = pytz.timezone(tz_str)
-                    except:
-                        # If timezone parsing fails, fall back to UTC
-                        print(f"Warning: Could not parse timezone '{tz_str}', using UTC")
-                        local_tz = pytz.utc
+                    tz_name = ABBR_TO_TZ.get(tz_upper, tz_str_raw)
+
+                try:
+                    local_tz = pytz.timezone(tz_name)
+                except Exception:
+                    # Last-ditch attempt with dateutil (may return fixed offset)
+                    from dateutil import tz as du_tz
+                    local_tz = du_tz.gettz(tz_name) or pytz.utc
+                    if local_tz is pytz.utc:
+                        print(f"Warning: Could not resolve timezone '{tz_str_raw}', defaulting to UTC")
                 
                 # Parse times and combine with date
                 start_time = parser.parse(start_time_str).time()
                 end_time = parser.parse(end_time_str).time()
                 
-                # Combine date and time, then localize to the timezone
+                # Combine date and time (still naive at this point)
                 start_dt_naive = datetime.combine(event_date, start_time)
                 end_dt_naive = datetime.combine(event_date, end_time)
-                
-                # Localize to the specified timezone
-                start_dt = local_tz.localize(start_dt_naive)
-                end_dt = local_tz.localize(end_dt_naive)
+
+                # Attach timezone – handle both pytz and dateutil/zoneinfo objects.
+                def _attach_tz(tzobj, naive_dt):
+                    """Return timezone-aware dt, using proper DST rules where possible."""
+                    if hasattr(tzobj, "localize"):
+                        # pytz – honour DST rules automatically; let pytz raise on ambiguous times
+                        try:
+                            return tzobj.localize(naive_dt, is_dst=None)
+                        except Exception:
+                            # Fall back to is_dst=True on ambiguity (earlier) – still better than wrong offset
+                            return tzobj.localize(naive_dt, is_dst=True)
+                    else:
+                        # zoneinfo/dateutil – just set tzinfo; these implement DST via utcoffset()
+                        return naive_dt.replace(tzinfo=tzobj)
+
+                start_dt = _attach_tz(local_tz, start_dt_naive)
+                end_dt = _attach_tz(local_tz, end_dt_naive)
                 
                 # Convert to UTC for storage
                 start_dt_utc = start_dt.astimezone(pytz.utc)
