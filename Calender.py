@@ -589,17 +589,24 @@ class NLCalendarCreator(QMainWindow):
              #previewContainer {{
                  background-color: {COLORS["background_primary"]};
                  border: 1px solid {COLORS["border_light"]};
-                 border-radius: {BORDER_RADIUS["lg"]}; /* More rounded corners */
-                 padding: {SPACING_SCALE["sm"]} {SPACING_SCALE["md"]}; /* 16px vertical, 24px horizontal */
+                 border-radius: {BORDER_RADIUS["lg"]};
              }}
          """)
-        preview_layout = QVBoxLayout(preview_container) # Changed to vertical layout for cleaner single line
-        preview_layout.setContentsMargins(0,0,0,0)
-        preview_layout.setSpacing(int(SPACING_SCALE["xs"].replace("px", ""))) # 8px spacing between elements
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(
+            int(SPACING_SCALE["sm"].replace("px", "")),
+            int(SPACING_SCALE["xs"].replace("px", "")),
+            int(SPACING_SCALE["sm"].replace("px", "")),
+            int(SPACING_SCALE["sm"].replace("px", ""))
+        )
+        preview_layout.setSpacing(int(SPACING_SCALE["xs"].replace("px", "")))
 
         # Single line preview with all info
         self.preview_event_title = QLabel("Event title • Date • Time")
-        self.preview_event_title.setStyleSheet(f"color: {COLORS['text_tertiary']}; font-size: {TYPOGRAPHY_SCALE['body']['size']}; font-weight: {TYPOGRAPHY_SCALE['body']['weight']};")
+        self.preview_event_title.setStyleSheet(
+            f"color: {COLORS['text_tertiary']}; font-size: {TYPOGRAPHY_SCALE['body']['size']}; "
+            f"font-weight: {TYPOGRAPHY_SCALE['body']['weight']};"
+        )
         self.preview_event_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Remove the separate date and time labels - we'll combine everything into one line
