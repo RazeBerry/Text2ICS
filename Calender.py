@@ -1,6 +1,7 @@
 import sys
 import os
 from datetime import datetime, timedelta
+import copy
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
                            QProgressBar, QHBoxLayout, QSizePolicy)
@@ -20,6 +21,7 @@ from string import Formatter
 import uuid # Import uuid
 import dateutil.parser
 from dateutil.relativedelta import relativedelta
+from icalendar import Calendar
 
 # Import the CalendarAPIClient from the new module
 from api_client import CalendarAPIClient
@@ -101,6 +103,70 @@ SHADOW = {
     "lg": "0 10px 25px rgba(0, 0, 0, 0.1)"
 }
 
+
+def combine_ics_strings(ics_strings: List[str]) -> str:
+    """Merge multiple ICS documents while preserving calendar metadata and TZ data."""
+    if not ics_strings:
+        raise ValueError("No ICS data provided to combine.")
+
+    calendars: List[Calendar] = []
+    for index, raw in enumerate(ics_strings):
+        if raw is None:
+            continue
+
+        data = raw.encode("utf-8") if isinstance(raw, str) else raw
+        try:
+            calendars.append(Calendar.from_ical(data))
+        except Exception as exc:  # pragma: no cover - defensive logging for debugging
+            raise ValueError(f"Failed to parse ICS payload at index {index}: {exc}") from exc
+
+    if not calendars:
+        raise ValueError("No parseable ICS data provided.")
+
+    merged_calendar = Calendar()
+
+    for calendar in calendars:
+        for prop, value in calendar.property_items():
+            if merged_calendar.get(prop) is None:
+                merged_calendar.add(prop, value)
+
+    # Ensure mandatory headers exist if they were missing from the sources.
+    if merged_calendar.get("PRODID") is None:
+        merged_calendar.add("PRODID", "-//NL Calendar Creator//EN")
+    if merged_calendar.get("VERSION") is None:
+        merged_calendar.add("VERSION", "2.0")
+    if merged_calendar.get("CALSCALE") is None:
+        merged_calendar.add("CALSCALE", "GREGORIAN")
+
+    seen_timezones: set[str] = set()
+
+    for calendar in calendars:
+        for component in calendar.subcomponents:
+            component_copy = copy.deepcopy(component)
+
+            if component_copy.name == "VTIMEZONE":
+                tzid_raw = component_copy.get("TZID")
+                tzid = str(tzid_raw) if tzid_raw else f"__anon_tz_{len(seen_timezones)}"
+                if tzid in seen_timezones:
+                    continue
+                seen_timezones.add(tzid)
+                merged_calendar.add_component(component_copy)
+                continue
+
+            if component_copy.name == "VEVENT":
+                component_copy["UID"] = f"{uuid.uuid4()}@nl-calendar"
+                merged_calendar.add_component(component_copy)
+                continue
+
+            merged_calendar.add_component(component_copy)
+
+    final_bytes = merged_calendar.to_ical()
+    final_text = final_bytes.decode("utf-8")
+    # Normalise newline usage to CRLF as required by RFC5545.
+    final_text = final_text.replace("\r\n", "\n").replace("\n", "\r\n")
+    return final_text
+
+
 class ImageAttachmentArea(QLabel):
     """Custom widget for handling image drag and drop"""
     # Add a signal to notify when images are added/cleared
@@ -111,6 +177,8 @@ class ImageAttachmentArea(QLabel):
         self.setAcceptDrops(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumHeight(int(SPACING_SCALE["xxl"].replace("px", "")))
+        self.image_data: List[tuple[str, str, str]] = []
+        self._temp_paths: set[str] = set()
         self.setStyleSheet(f"""
             QLabel {{
                 border: 2px dashed {COLORS['border_medium']};
@@ -128,9 +196,24 @@ class ImageAttachmentArea(QLabel):
         self.reset_state()
 
     def reset_state(self):
+        self._cleanup_temp_files()
         self.setText("Drag & Drop Images Here")
         self.image_data = []
+        self._temp_paths.clear()
         self.images_changed.emit(False)  # Notify that images were cleared
+
+    def _cleanup_temp_files(self):
+        for temp_path in list(self._temp_paths):
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception as e:
+                print(f"Warning: Failed to delete temp image file '{temp_path}': {e}")
+            finally:
+                self._temp_paths.discard(temp_path)
+
+    def closeEvent(self, event):
+        self._cleanup_temp_files()
+        super().closeEvent(event)
         
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -214,6 +297,9 @@ class ImageAttachmentArea(QLabel):
         # Update UI if any images were successfully added
         if valid_images:
             self.image_data.extend(valid_images)
+            for temp_path, _, _ in valid_images:
+                if temp_path:
+                    self._temp_paths.add(temp_path)
             self.update_preview()
             self.images_changed.emit(True)
 
@@ -325,6 +411,10 @@ class NLCalendarCreator(QMainWindow):
         self.setWindowTitle("Create Calendar Event")
         self.setMinimumSize(600, 450) # Adjusted minimum size
         self.resize(700, 500) # Default size
+
+        # Track background threads so we can manage their lifecycle.
+        self._active_threads: set[threading.Thread] = set()
+        self._threads_lock = threading.Lock()
 
         # Initialize preview references
         self.preview_event_title = None
@@ -734,10 +824,16 @@ class NLCalendarCreator(QMainWindow):
         self.enable_ui_signal.emit(False)
 
         # Pass event description and image data to the thread
-        threading.Thread(
-            target=self._create_event_thread, 
-            args=(event_description, self.image_area.image_data.copy())
-        ).start()
+        worker = threading.Thread(
+            target=self._create_event_thread,
+            args=(event_description, self.image_area.image_data.copy()),
+            daemon=True
+        )
+
+        with self._threads_lock:
+            self._active_threads.add(worker)
+
+        worker.start()
 
     def _create_event_thread(self, event_description, image_data):
         try:
@@ -763,42 +859,13 @@ class NLCalendarCreator(QMainWindow):
             self.update_status_signal.emit(f"Processing {event_count} {event_text}...")
             print(f"DEBUG: Received {event_count} wrapped ICS string(s) from API.")
 
-            # --- Assemble the combined ICS content CORRECTLY ---
-            combined_vevents = []
-            
-            # Helper function to ensure a unique UID for each VEVENT
-            def _force_new_uid(vevent: str) -> str:
-                new_uid = f"{uuid.uuid4()}@nl-calendar"
-                # replace the first UID:… line (RFC5545 §3.8.4.7)
-                # Use re.IGNORECASE just in case the API returns 'uid:' instead of 'UID:'
-                return re.sub(r"^UID:.*$", f"UID:{new_uid}", vevent, count=1, flags=re.MULTILINE | re.IGNORECASE)
+            # Merge all ICS payloads while preserving metadata/timezones.
+            final_ics_content = combine_ics_strings(ics_strings)
 
-            for i, single_ics in enumerate(ics_strings):
-                # Extract content between BEGIN:VEVENT and END:VEVENT
-                match = re.search(r"BEGIN:VEVENT(.*?)END:VEVENT", single_ics, re.DOTALL | re.IGNORECASE) # Added IGNORECASE here too for robustness
-                if match:
-                    vevent_content = match.group(0) # Includes BEGIN/END VEVENT
-                    # Ensure a unique UID before appending
-                    combined_vevents.append(_force_new_uid(vevent_content))
-                    print(f"DEBUG: Extracted and processed VEVENT {i+1} with new UID.")
-                else:
-                    print(f"Warning: Could not extract VEVENT from ICS string {i+1}:\n{single_ics[:200]}...")
-            
-            if not combined_vevents:
-                 raise Exception("Failed to extract any valid VEVENT blocks from API response.")
-
-            # Construct the final single ICS file content
-            final_ics_content = (
-                "BEGIN:VCALENDAR\r\n"
-                "VERSION:2.0\r\n"
-                "PRODID:-//NL Calendar Creator//EN\r\n"
-                # Optional: Add CALSCALE as suggested for robustness
-                "CALSCALE:GREGORIAN\r\n"
-                + "\r\n".join(combined_vevents) +  # Join extracted VEVENT blocks with CRLF
-                "\r\nEND:VCALENDAR"
+            print(
+                "DEBUG: Final combined ICS content (first 10000 chars):\n------\n"
+                f"{final_ics_content[:10000]}\n------"
             )
-            
-            print(f"DEBUG: Final combined ICS content (first 10000 chars):\n------\n{final_ics_content[:10000]}\n------")
 
             # --- Create, open, and clean up the single temp file ---
             temp_path: Optional[str] = None # Explicitly define type
@@ -883,6 +950,8 @@ class NLCalendarCreator(QMainWindow):
             self.update_status_signal.emit(error_message)
             QTimer.singleShot(0, lambda: self._show_error(error_message))
         finally:
+            with self._threads_lock:
+                self._active_threads.discard(threading.current_thread())
             self.enable_ui_signal.emit(True)
 
     @pyqtSlot(str) # Decorate as a slot invokable via invokeMethod
