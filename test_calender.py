@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -106,5 +107,94 @@ def test_process_event_uses_daemon_thread(qt_app: QApplication, monkeypatch: pyt
 
     with window._threads_lock:
         window._active_threads.clear()
+
+    window.close()
+
+
+class FixedDateTime(datetime):
+    """Deterministic datetime for preview/date parsing tests."""
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        return cls(2024, 4, 1, 12, 0, 0, tzinfo=tz)
+
+
+def test_parse_event_text_extracts_components(
+    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
+    window = Calender.NLCalendarCreator()
+
+    parsed = window.parse_event_text("Dinner with Mia next Tuesday at 7pm")
+
+    assert parsed["title"] == "Dinner Mia at"
+    assert parsed["date"] == "Apr 09"
+    assert parsed["time"] == "7pm"
+    assert parsed["location"] is None
+
+    window.close()
+
+
+def test_parse_event_text_handles_simple_title(
+    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
+    window = Calender.NLCalendarCreator()
+
+    parsed = window.parse_event_text("Project kickoff")
+
+    assert parsed["title"] == "Project kickoff"
+    assert parsed["date"] is None
+    assert parsed["time"] is None
+
+    window.close()
+
+
+def test_format_date_display_handles_relative_terms(
+    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
+    window = Calender.NLCalendarCreator()
+
+    assert window.format_date_display("today") == "Apr 01"
+    assert window.format_date_display("tomorrow") == "Apr 02"
+    assert window.format_date_display("next friday") == "Apr 12"
+    assert window.format_date_display("March 30") == "Mar 30"
+
+    window.close()
+
+
+def test_update_live_preview_populates_content(
+    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
+    window = Calender.NLCalendarCreator()
+
+    window.text_input.setPlainText("Dinner with Mia next Tuesday at 7pm")
+    window.update_live_preview()
+
+    assert window.preview_event_title.text() == "Dinner Mia at \u2022 Apr 09 \u2022 7pm"
+    assert f"color: {Calender.COLORS['text_primary']}" in window.preview_event_title.styleSheet()
+
+    window.close()
+
+
+def test_update_live_preview_resets_to_placeholder(
+    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
+    window = Calender.NLCalendarCreator()
+
+    window.text_input.setPlainText("Project kickoff")
+    window.update_live_preview()
+
+    assert window.preview_event_title.text() == "Project kickoff \u2022 Date \u2022 Time"
+    assert f"color: {Calender.COLORS['text_primary']}" in window.preview_event_title.styleSheet()
+
+    window.text_input.setPlainText("")
+    window.update_live_preview()
+
+    assert window.preview_event_title.text() == "Event title \u2022 Date \u2022 Time"
+    assert f"color: {Calender.COLORS['text_tertiary']}" in window.preview_event_title.styleSheet()
 
     window.close()
