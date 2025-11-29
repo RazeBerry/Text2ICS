@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <!-- Background -->
+  <rect x="10" y="20" width="100" height="90" rx="12" ry="12" fill="#FFFFFF" stroke="#E7E5E4" stroke-width="2"/>
+
+  <!-- Top band (coral accent) -->
+  <path d="M10 32 Q10 20 22 20 L98 20 Q110 20 110 32 L110 40 L10 40 Z" fill="#D97706"/>
+
+  <!-- Calendar rings -->
+  <rect x="30" y="12" width="8" height="20" rx="4" fill="#9CA3AF"/>
+  <rect x="82" y="12" width="8" height="20" rx="4" fill="#9CA3AF"/>
+
+  <!-- Grid lines -->
+  <line x1="10" y1="60" x2="110" y2="60" stroke="#E7E5E4" stroke-width="1"/>
+  <line x1="10" y1="80" x2="110" y2="80" stroke="#E7E5E4" stroke-width="1"/>
+  <line x1="43" y1="40" x2="43" y2="110" stroke="#E7E5E4" stroke-width="1"/>
+  <line x1="77" y1="40" x2="77" y2="110" stroke="#E7E5E4" stroke-width="1"/>
+
+  <!-- Date numbers (example dates) -->
+  <text x="26" y="55" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6B7280" text-anchor="middle">1</text>
+  <text x="60" y="55" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6B7280" text-anchor="middle">2</text>
+  <text x="93" y="55" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6B7280" text-anchor="middle">3</text>
+
+  <text x="26" y="75" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6B7280" text-anchor="middle">4</text>
+  <text x="60" y="75" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6B7280" text-anchor="middle">5</text>
+  <text x="93" y="75" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6B7280" text-anchor="middle">6</text>
+
+  <text x="26" y="95" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6B7280" text-anchor="middle">7</text>
+
+  <!-- Selected date highlight -->
+  <circle cx="60" cy="90" r="12" fill="#D97706"/>
+  <text x="60" y="95" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="600" fill="white" text-anchor="middle">8</text>
+
+  <text x="93" y="95" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6B7280" text-anchor="middle">9</text>
+</svg>
