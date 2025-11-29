@@ -84,29 +84,34 @@ def test_combine_ics_strings_requires_input() -> None:
         Calender.combine_ics_strings([])
 
 
-def test_process_event_uses_daemon_thread(qt_app: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_event_uses_executor(qt_app: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify process_event uses ThreadPoolExecutor for background work."""
     window = Calender.NLCalendarCreator()
     window.api_client = object()
     window.text_input.setPlainText("Test event at 7pm tomorrow")
 
-    created_thread: dict[str, Any] = {}
+    submitted_tasks: list[dict[str, Any]] = []
 
-    class DummyThread:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            created_thread["args"] = args
-            created_thread["kwargs"] = kwargs
+    class MockFuture:
+        def add_done_callback(self, callback: Any) -> None:
+            pass
 
-        def start(self) -> None:
-            created_thread["started"] = True
+    def mock_submit(fn: Any, *args: Any, **kwargs: Any) -> MockFuture:
+        submitted_tasks.append({"fn": fn, "args": args, "kwargs": kwargs})
+        return MockFuture()
 
-    monkeypatch.setattr(Calender.threading, "Thread", DummyThread)
+    # Replace the executor's submit method
+    window._executor.submit = mock_submit
 
     window.process_event()
 
-    assert created_thread["kwargs"]["daemon"] is True
+    # Verify a task was submitted to the executor
+    assert len(submitted_tasks) == 1
+    assert submitted_tasks[0]["fn"] == window._create_event_thread
 
-    with window._threads_lock:
-        window._active_threads.clear()
+    # Verify the executor exists and is a ThreadPoolExecutor
+    assert hasattr(window, "_executor")
+    assert window._executor is not None
 
     window.close()
 

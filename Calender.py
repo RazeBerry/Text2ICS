@@ -4,13 +4,15 @@ import logging
 from datetime import datetime, timedelta
 import copy
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, Future
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
                            QHBoxLayout, QSizePolicy)
-from PyQt6.QtGui import QIcon, QDragEnterEvent, QDropEvent
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, QBuffer, pyqtSlot, Q_ARG, QByteArray
+from PyQt6.QtGui import QIcon, QDragEnterEvent, QDropEvent, QKeyEvent, QCloseEvent
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, QBuffer, pyqtSlot, Q_ARG, QByteArray, QEvent
 from typing import Optional, List, Dict
 import threading
+import queue
 import re
 import base64
 import mimetypes
@@ -22,10 +24,38 @@ import shutil
 import dateutil.parser
 from icalendar import Calendar
 
-from api_client import CalendarAPIClient
+from api_client import CalendarAPIClient, build_ics_from_events
 
 
 logger = logging.getLogger(__name__)
+
+
+def get_user_friendly_error(error: Exception) -> str:
+    """Convert technical errors to user-friendly messages"""
+    error_str = str(error).lower()
+    error_type = type(error).__name__
+
+    ERROR_MAPPINGS = {
+        "invalid api key": "Your API key isn't working. Please check your GEMINI_API_KEY environment variable.",
+        "api key": "There's an issue with your API key. Please verify it's set correctly.",
+        "rate limit": "Too many requests. Please wait a minute and try again.",
+        "quota": "API quota exceeded. You may need to wait or upgrade your API plan.",
+        "network": "Can't reach the server. Please check your internet connection.",
+        "connection": "Network connection failed. Check your internet and try again.",
+        "timeout": "Request timed out. The server might be busy - please try again.",
+        "json": "AI returned unexpected format. Try rephrasing your description or try again.",
+        "permission": "Permission denied. Check file permissions and try again.",
+        "file not found": "File not found. The image may have been moved or deleted.",
+        "no event data": "Couldn't extract event details. Try being more specific (include date, time, title).",
+    }
+
+    # Check for matching error patterns
+    for pattern, friendly_msg in ERROR_MAPPINGS.items():
+        if pattern in error_str:
+            return f"{friendly_msg}\n\nTechnical details: {error_type}: {str(error)}"
+
+    # Default message for unknown errors
+    return f"Something went wrong.\n\nTechnical details: {error_type}: {str(error)}\n\nPlease try again or contact support if this persists."
 
 
 def px(value: int) -> str:
@@ -50,25 +80,98 @@ SPACING_SCALE = {
     "xxl": 64,
 }
 
-# Apple Design System - Semantic Colors
-COLORS = {
-    "text_primary": "#000000",
-    "text_secondary": "#8A8A8E", 
-    "text_tertiary": "#C7C7CC",
-    "text_placeholder": "#C7C7CC",
+# Anthropic Design System - Dual Theme Palettes
+LIGHT_PALETTE = {
+    "text_primary": "#1F1F1F",
+    "text_secondary": "#6B7280",
+    "text_tertiary": "#9CA3AF",
+    "text_placeholder": "#9CA3AF",
     "background_primary": "#FFFFFF",
-    "background_secondary": "#F2F2F7",
-    "background_tertiary": "#FFFFFF",
-    "border_light": "#E5E5EA",
-    "border_medium": "#D1D1D6",
-    "accent_blue": "#007AFF",
-    "accent_blue_hover": "#0056CC",
-    "accent_blue_pressed": "#004499",
-    "accent_blue_disabled": "#B0B0B0",
-    "success_green": "#30D158",
-    "warning_orange": "#FF9F0A",
-    "error_red": "#FF3B30"
+    "background_secondary": "#FAFAF9",
+    "background_tertiary": "#F5F5F4",
+    "border_light": "#E7E5E4",
+    "border_medium": "#D6D3D1",
+    "accent": "#D97706",
+    "accent_hover": "#B45309",
+    "accent_pressed": "#92400E",
+    "accent_disabled": "#D6D3D1",
+    "success": "#059669",
+    "warning": "#D97706",
+    "error": "#DC2626",
 }
+
+DARK_PALETTE = {
+    "text_primary": "#FAFAFA",
+    "text_secondary": "#A1A1AA",
+    "text_tertiary": "#71717A",
+    "text_placeholder": "#71717A",
+    "background_primary": "#1F1F1F",
+    "background_secondary": "#171717",
+    "background_tertiary": "#262626",
+    "border_light": "#2D2D2D",
+    "border_medium": "#404040",
+    "accent": "#F59E0B",
+    "accent_hover": "#FBBF24",
+    "accent_pressed": "#D97706",
+    "accent_disabled": "#404040",
+    "success": "#10B981",
+    "warning": "#F59E0B",
+    "error": "#EF4444",
+}
+
+# Thread-safe theme management
+class ThemeManager:
+    """Thread-safe theme state management."""
+    _theme: str = "light"
+    _lock: threading.Lock = threading.Lock()
+
+    @classmethod
+    def get_theme(cls) -> str:
+        """Get current theme name (thread-safe)."""
+        with cls._lock:
+            return cls._theme
+
+    @classmethod
+    def set_theme(cls, theme: str) -> None:
+        """Set the current theme (thread-safe)."""
+        with cls._lock:
+            if theme in ("light", "dark"):
+                cls._theme = theme
+
+    @classmethod
+    def toggle_theme(cls) -> str:
+        """Toggle between light and dark theme (thread-safe). Returns new theme name."""
+        with cls._lock:
+            cls._theme = "dark" if cls._theme == "light" else "light"
+            return cls._theme
+
+
+def get_color(key: str) -> str:
+    """Get color from current theme palette."""
+    palette = LIGHT_PALETTE if ThemeManager.get_theme() == "light" else DARK_PALETTE
+    return palette.get(key, "#FF00FF")  # Magenta fallback for missing keys
+
+
+# Backwards compatibility functions
+def set_theme(theme: str) -> None:
+    """Set the current theme ('light' or 'dark')."""
+    ThemeManager.set_theme(theme)
+
+
+def toggle_theme() -> str:
+    """Toggle between light and dark theme. Returns new theme name."""
+    return ThemeManager.toggle_theme()
+
+# Backwards compatibility - COLORS dict that reads from current palette
+class _DynamicColors:
+    """Dynamic color accessor that reads from current theme."""
+    def __getitem__(self, key: str) -> str:
+        return get_color(key)
+    def get(self, key: str, default: str = "") -> str:
+        result = get_color(key)
+        return result if result != "#FF00FF" else default
+
+COLORS = _DynamicColors()
 
 # Design tokens
 BORDER_RADIUS = {
@@ -160,6 +263,7 @@ class ImageAttachmentPayload:
                 self.base64_data = base64.b64encode(fh.read()).decode("utf-8")
         return path, self.mime_type, self.base64_data
 
+
 def combine_ics_strings(ics_strings: List[str]) -> str:
     """Merge multiple ICS documents while preserving calendar metadata and TZ data."""
     if not ics_strings:
@@ -228,39 +332,47 @@ class ImageAttachmentArea(QLabel):
     # Add a signal to notify when images are added/cleared
     images_changed = pyqtSignal(bool)  # True when images added, False when cleared
     DEFAULT_TEXT = "Drop image or\nscreenshot here\nto attach to event"
-    
-    BASE_STYLE = f"""
-        QLabel {{
-            border: 2px dashed {COLORS['border_medium']};
-            border-radius: {px(BORDER_RADIUS['md'])};
-            padding: {px(SPACING_SCALE['md'])};
-            background-color: {COLORS['background_secondary']};
-            color: {COLORS['text_tertiary']};
-            font-size: {px(TYPOGRAPHY_SCALE['body']['size_px'])};
-        }}
-        QLabel:hover {{
-            border-color: {COLORS['accent_blue']};
-            background-color: {COLORS['background_tertiary']};
-        }}
-    """
 
-    HIGHLIGHT_STYLE = f"""
-        QLabel {{
-            border: 2px dashed {COLORS['accent_blue']};
-            border-radius: {px(BORDER_RADIUS['md'])};
-            padding: {px(SPACING_SCALE['md'])};
-            background-color: rgba(0, 122, 255, 0.1);
-            color: {COLORS['text_primary']};
-            font-weight: {TYPOGRAPHY_SCALE['body']['weight']};
-            font-size: {px(TYPOGRAPHY_SCALE['body']['size_px'])};
-            line-height: {TYPOGRAPHY_SCALE['body']['line_height']};
-        }}
-        QLabel:hover {{
-            border-color: {COLORS['accent_blue']};
-            background-color: rgba(0, 122, 255, 0.15);
-        }}
-    """
-    
+    @staticmethod
+    def _get_base_style() -> str:
+        """Generate base style with current theme colors."""
+        return f"""
+            QLabel {{
+                border: 2px dashed {get_color('border_medium')};
+                border-radius: {px(BORDER_RADIUS['md'])};
+                padding: {px(SPACING_SCALE['md'])};
+                background-color: {get_color('background_secondary')};
+                color: {get_color('text_tertiary')};
+                font-size: {px(TYPOGRAPHY_SCALE['body']['size_px'])};
+            }}
+            QLabel:hover {{
+                border-color: {get_color('accent')};
+                background-color: {get_color('background_tertiary')};
+            }}
+        """
+
+    @staticmethod
+    def _get_highlight_style() -> str:
+        """Generate highlight style with current theme colors."""
+        # Use accent color for highlight with transparency
+        accent = get_color('accent')
+        return f"""
+            QLabel {{
+                border: 2px dashed {accent};
+                border-radius: {px(BORDER_RADIUS['md'])};
+                padding: {px(SPACING_SCALE['md'])};
+                background-color: rgba(217, 119, 6, 0.1);
+                color: {get_color('text_primary')};
+                font-weight: {TYPOGRAPHY_SCALE['body']['weight']};
+                font-size: {px(TYPOGRAPHY_SCALE['body']['size_px'])};
+                line-height: {TYPOGRAPHY_SCALE['body']['line_height']};
+            }}
+            QLabel:hover {{
+                border-color: {accent};
+                background-color: rgba(217, 119, 6, 0.15);
+            }}
+        """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
@@ -270,13 +382,20 @@ class ImageAttachmentArea(QLabel):
         self.image_data: List[ImageAttachmentPayload] = []
         self._temp_paths: set[str] = set()
         self._known_sources: set[str] = set()
-        self.setStyleSheet(self.BASE_STYLE)
+        self.setStyleSheet(self._get_base_style())
         self.reset_state()
+
+    def refresh_theme(self):
+        """Refresh styles after theme change."""
+        if self.image_data:
+            self.setStyleSheet(self._get_highlight_style())
+        else:
+            self.setStyleSheet(self._get_base_style())
 
     def reset_state(self):
         self._cleanup_temp_files()
         self.setText(self.DEFAULT_TEXT)
-        self.setStyleSheet(self.BASE_STYLE)
+        self.setStyleSheet(self._get_base_style())
         self.image_data = []
         self._temp_paths.clear()
         self._known_sources.clear()
@@ -403,17 +522,17 @@ class ImageAttachmentArea(QLabel):
         if not self.image_data:
             self.reset_state()
             return
-            
+
         # Update alignment flag usage
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
+
         # Create a more engaging preview message
         count = len(self.image_data)
         if count == 1:
-            preview_text = "✨ 1 image ready to process!"
+            preview_text = "1 image ready to process"
         else:
-            preview_text = f"🎉 {count} images ready to go!"
-            
+            preview_text = f"{count} images ready to process"
+
         # Add a helpful secondary message
         secondary_text = "\n\nClick 'Create Event' to process"
         
@@ -421,7 +540,7 @@ class ImageAttachmentArea(QLabel):
         self.setText(f"{preview_text}{secondary_text}")
         
         # Update styling to make it more noticeable
-        self.setStyleSheet(self.HIGHLIGHT_STYLE)
+        self.setStyleSheet(self._get_highlight_style())
 
     def _is_supported_image(self, file_path: str) -> bool:
         suffix = Path(file_path).suffix.lower()
@@ -452,6 +571,10 @@ class NLCalendarCreator(QMainWindow):
     enable_ui_signal = pyqtSignal(bool)
     clear_input_signal = pyqtSignal()
     show_progress_signal = pyqtSignal(bool)
+    # Signal to finalize events on the main thread
+    finalize_events_signal = pyqtSignal(list)
+    # Signal to show image warning dialog from worker threads
+    image_warning_signal = pyqtSignal(str, int, object)
     
     def __init__(self):
         super().__init__()
@@ -459,9 +582,14 @@ class NLCalendarCreator(QMainWindow):
         self.setMinimumSize(600, 450) # Adjusted minimum size
         self.resize(700, 500) # Default size
 
-        # Track background threads so we can manage their lifecycle.
-        self._active_threads: set[threading.Thread] = set()
+        # ThreadPoolExecutor for managed background work
+        # This ensures proper cleanup on app exit (unlike daemon threads)
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="calendar_worker")
+        self._active_futures: set[Future] = set()
         self._threads_lock = threading.Lock()
+
+        # Lock for thread-safe API client initialization
+        self._api_client_lock = threading.Lock()
 
         # Initialize preview references
         self.preview_event_title = None
@@ -510,7 +638,7 @@ class NLCalendarCreator(QMainWindow):
             }}
         """)
 
-        subtitle_label = QLabel("Type freely or drop a photo. We'll do the rest.")
+        subtitle_label = QLabel("Type freely or drop a photo. We'll do the rest.\nTip: Cmd+Enter to submit, Esc to clear")
         subtitle_label.setStyleSheet(f"""
             QLabel {{
                 font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
@@ -543,17 +671,10 @@ class NLCalendarCreator(QMainWindow):
 
         # --- Example Input/Detected Area ---
         # Use a QWidget as a styled container
-        example_input_container = QWidget()
-        example_input_container.setObjectName("exampleInputContainer")
-        example_input_container.setStyleSheet(f"""
-            #exampleInputContainer {{
-                background-color: {COLORS["background_primary"]};
-                border: 1px solid {COLORS["border_light"]};
-                border-radius: {px(BORDER_RADIUS["md"])};
-                padding: 0px;
-            }}
-        """)
-        example_input_layout = QVBoxLayout(example_input_container)
+        self.input_container = QWidget()
+        self.input_container.setObjectName("exampleInputContainer")
+        self._apply_input_container_style()
+        example_input_layout = QVBoxLayout(self.input_container)
         example_input_layout.setContentsMargins(
             SPACING_SCALE["sm"],
             SPACING_SCALE["sm"],
@@ -572,48 +693,16 @@ class NLCalendarCreator(QMainWindow):
         
         # Set fixed size policies to prevent resizing behavior
         self.text_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.text_input.setFixedHeight(96) # Fixed height in pixels instead of calculation
-        self.text_input.setMaximumHeight(96) # Ensure it never grows beyond this
-        self.text_input.setMinimumHeight(96) # Ensure it never shrinks below this
+        self.text_input.setFixedHeight(200) # Increased from 96px for better multi-event descriptions
+        self.text_input.setMaximumHeight(200) # Ensure it never grows beyond this
+        self.text_input.setMinimumHeight(200) # Ensure it never shrinks below this
 
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(120)
         self._preview_timer.timeout.connect(self.update_live_preview)
 
-        self.text_input.setStyleSheet(f"""
-            QTextEdit {{
-                color: {COLORS["text_primary"]};
-                background-color: transparent;
-                border: none;
-                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
-                line-height: {TYPOGRAPHY_SCALE["body"]["line_height"]};
-                padding: {px(SPACING_SCALE["xs"])} 0px;
-            }}
-            QTextEdit:focus {{
-                border: none;
-                outline: none;
-                background-color: transparent;
-            }}
-            QScrollBar:vertical {{
-                background: {COLORS["background_secondary"]};
-                width: 8px;
-                border-radius: {px(4)};
-                margin: 2px;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {COLORS["border_medium"]};
-                border-radius: {px(4)};
-                min-height: 20px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: {COLORS["text_tertiary"]};
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                border: none;
-                background: none;
-            }}
-        """)
+        self._apply_text_input_style()
         
         # Connect text changes to live preview update
         self.text_input.textChanged.connect(self._schedule_preview_update)
@@ -621,30 +710,25 @@ class NLCalendarCreator(QMainWindow):
         # Add only the text input widget to the layout
         example_input_layout.addWidget(self.text_input)
 
-        left_panel_layout.addWidget(example_input_container)
+        left_panel_layout.addWidget(self.input_container)
 
 
         # --- Preview Area ---
-        preview_title = QLabel("This is what we'll create in your calendar")
+        preview_title = QLabel("Quick preview (AI may interpret differently)")
         preview_title.setStyleSheet(f"""
             QLabel {{
                 font-size: {px(TYPOGRAPHY_SCALE["caption"]["size_px"])};
                 color: {COLORS["text_secondary"]};
                 margin-top: {px(SPACING_SCALE["xs"])}; /* 8px space above preview */
+                font-style: italic;
             }}
         """)
         left_panel_layout.addWidget(preview_title)
 
-        preview_container = QWidget()
-        preview_container.setObjectName("previewContainer")
-        preview_container.setStyleSheet(f"""
-             #previewContainer {{
-                 background-color: {COLORS["background_primary"]};
-                 border: 1px solid {COLORS["border_light"]};
-                 border-radius: {px(BORDER_RADIUS["lg"])};
-             }}
-         """)
-        preview_layout = QVBoxLayout(preview_container)
+        self.preview_container = QWidget()
+        self.preview_container.setObjectName("previewContainer")
+        self._apply_preview_container_style()
+        preview_layout = QVBoxLayout(self.preview_container)
         preview_layout.setContentsMargins(
             SPACING_SCALE["sm"],
             SPACING_SCALE["sm"],
@@ -665,7 +749,7 @@ class NLCalendarCreator(QMainWindow):
         # Remove the separate date and time labels - we'll combine everything into one line
         preview_layout.addWidget(self.preview_event_title)
 
-        left_panel_layout.addWidget(preview_container)
+        left_panel_layout.addWidget(self.preview_container)
         left_panel_layout.addStretch(1) # Push content up
 
         # --- 2b. Right Panel: Photo Attachments ---
@@ -696,36 +780,38 @@ class NLCalendarCreator(QMainWindow):
         # Add content layout to the outer layout
         outer_layout.addLayout(content_layout, 1) # Make content area expand vertically
 
-        # --- 3. Bottom Create Button ---
+        # --- 3. Bottom Buttons (Create Event + Clear) ---
         button_layout = QHBoxLayout()
-        button_layout.addStretch(1) # Push button to the right/center
+        button_layout.addStretch(1) # Push buttons to center
+
+        # Theme toggle button
+        self.theme_toggle = QPushButton()
+        self.theme_toggle.setFixedSize(36, 36)
+        self.theme_toggle.clicked.connect(self._toggle_theme)
+        self._apply_theme_toggle_style()
+        button_layout.addWidget(self.theme_toggle)
+
+        button_layout.addSpacing(SPACING_SCALE["sm"])
+
+        # Clear button
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.clicked.connect(self._clear_all_inputs)
+        self.clear_button.setMinimumHeight(44)
+        self.clear_button.setMinimumWidth(100)
+        self._apply_clear_button_style()
+        button_layout.addWidget(self.clear_button)
+
+        # Add spacing between buttons
+        button_layout.addSpacing(SPACING_SCALE["sm"])
+
+        # Create Event button
         self.create_button = QPushButton("Create Event")
         self.create_button.clicked.connect(self.process_event) # Connect signal
         self.create_button.setMinimumHeight(44) # Make button taller
         self.create_button.setMinimumWidth(150) # Give it some width
-        self.create_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {COLORS['accent_blue']};
-                color: white;
-                border: none;
-                border-radius: {px(BORDER_RADIUS["md"])}; 
-                padding: {px(SPACING_SCALE["md"])} {px(SPACING_SCALE["xl"])};
-                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])}; 
-                font-weight: 600; /* Semi-bold for better accessibility */
-            }}
-            QPushButton:hover {{
-                background-color: {COLORS['accent_blue_hover']};
-            }}
-            QPushButton:pressed {{
-                background-color: {COLORS['accent_blue_pressed']};
-            }}
-            QPushButton:disabled {{
-                background-color: {COLORS['accent_blue_disabled']};
-                color: {COLORS['text_tertiary']};
-            }}
-        """)
+        self._apply_create_button_style()
         button_layout.addWidget(self.create_button)
-        button_layout.addStretch(1) # Push button to the left/center
+        button_layout.addStretch(1) # Push buttons to center
         outer_layout.addLayout(button_layout)
 
         # --- Initialization of other components (API client, overlay, etc.) ---
@@ -738,6 +824,8 @@ class NLCalendarCreator(QMainWindow):
         self.update_status_signal.connect(self.update_status) # Status updates if needed
         self.enable_ui_signal.connect(self._enable_ui)
         self.clear_input_signal.connect(self._clear_input) # To clear the input field later
+        self.finalize_events_signal.connect(self._finalize_events)
+        self.image_warning_signal.connect(self._show_image_warning)
         # self.show_progress_signal.connect(...) # Progress bar removed
 
         # Defer UI refresh if needed (less critical now with simpler layout)
@@ -746,17 +834,230 @@ class NLCalendarCreator(QMainWindow):
         # Make the scheduling method invokable from other threads
         QMetaObject.connectSlotsByName(self)
 
+    def _get_create_button_style(self) -> str:
+        """Generate create button style with current theme colors."""
+        return f"""
+            QPushButton {{
+                background-color: {get_color('accent')};
+                color: white;
+                border: none;
+                border-radius: {px(BORDER_RADIUS["md"])};
+                padding: {px(SPACING_SCALE["sm"])} {px(SPACING_SCALE["md"])};
+                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {get_color('accent_hover')};
+            }}
+            QPushButton:pressed {{
+                background-color: {get_color('accent_pressed')};
+            }}
+            QPushButton:disabled {{
+                background-color: {get_color('accent_disabled')};
+                color: {get_color('text_tertiary')};
+            }}
+        """
+
+    def _apply_create_button_style(self):
+        """Apply current theme style to create button."""
+        self.create_button.setStyleSheet(self._get_create_button_style())
+
+    def _get_clear_button_style(self) -> str:
+        """Generate clear button style with current theme colors."""
+        return f"""
+            QPushButton {{
+                background-color: {get_color('background_secondary')};
+                color: {get_color('text_primary')};
+                border: 1px solid {get_color('border_medium')};
+                border-radius: {px(BORDER_RADIUS["md"])};
+                padding: {px(SPACING_SCALE["xs"])} {px(SPACING_SCALE["sm"])};
+                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: {get_color('border_light')};
+                border-color: {get_color('text_tertiary')};
+            }}
+            QPushButton:pressed {{
+                background-color: {get_color('border_medium')};
+            }}
+        """
+
+    def _apply_clear_button_style(self):
+        """Apply current theme style to clear button."""
+        self.clear_button.setStyleSheet(self._get_clear_button_style())
+
+    def _get_theme_toggle_style(self) -> str:
+        """Generate theme toggle button style."""
+        return f"""
+            QPushButton {{
+                background-color: {get_color('background_tertiary')};
+                border: 1px solid {get_color('border_medium')};
+                border-radius: 18px;
+                font-size: 16px;
+            }}
+            QPushButton:hover {{
+                background-color: {get_color('border_light')};
+            }}
+        """
+
+    def _apply_theme_toggle_style(self):
+        """Apply current theme style to theme toggle."""
+        icon = "☀️" if ThemeManager.get_theme() == "dark" else "🌙"
+        self.theme_toggle.setText(icon)
+        self.theme_toggle.setStyleSheet(self._get_theme_toggle_style())
+
+    def _toggle_theme(self):
+        """Toggle between light and dark theme."""
+        toggle_theme()
+        self._refresh_all_styles()
+
+    def _refresh_all_styles(self):
+        """Refresh all widget styles after theme change."""
+        # Update main window background
+        self.centralWidget().setStyleSheet(f"""
+            QWidget {{
+                background-color: {get_color('background_secondary')};
+            }}
+        """)
+
+        # Update input containers
+        self._apply_input_container_style()
+        self._apply_text_input_style()
+        self._apply_preview_container_style()
+
+        # Update buttons
+        self._apply_theme_toggle_style()
+        self._apply_clear_button_style()
+        self._apply_create_button_style()
+
+        # Update overlay and processing label
+        self._apply_overlay_style()
+        self._apply_processing_label_style()
+
+        # Update image area
+        self.image_area.refresh_theme()
+
+        # Refresh live preview with current theme colors
+        self.update_live_preview()
+
+        # Force repaint
+        self.update()
+
+    def _get_input_container_style(self) -> str:
+        """Generate input container style with current theme colors."""
+        return f"""
+            #exampleInputContainer {{
+                background-color: {get_color('background_primary')};
+                border: 1px solid {get_color('border_light')};
+                border-radius: {px(BORDER_RADIUS['md'])};
+                padding: 0px;
+            }}
+        """
+
+    def _apply_input_container_style(self):
+        """Apply current theme style to input container."""
+        self.input_container.setStyleSheet(self._get_input_container_style())
+
+    def _get_text_input_style(self) -> str:
+        """Generate text input style with current theme colors."""
+        return f"""
+            QTextEdit {{
+                color: {get_color('text_primary')};
+                background-color: transparent;
+                border: none;
+                font-size: {px(TYPOGRAPHY_SCALE['body']['size_px'])};
+                line-height: {TYPOGRAPHY_SCALE['body']['line_height']};
+                padding: {px(SPACING_SCALE['xs'])} 0px;
+            }}
+            QTextEdit:focus {{
+                border: none;
+                outline: none;
+                background-color: transparent;
+            }}
+            QScrollBar:vertical {{
+                background: {get_color('background_secondary')};
+                width: 8px;
+                border-radius: {px(4)};
+                margin: 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {get_color('border_medium')};
+                border-radius: {px(4)};
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {get_color('text_tertiary')};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none;
+                background: none;
+            }}
+        """
+
+    def _apply_text_input_style(self):
+        """Apply current theme style to text input."""
+        self.text_input.setStyleSheet(self._get_text_input_style())
+
+    def _get_preview_container_style(self) -> str:
+        """Generate preview container style with current theme colors."""
+        return f"""
+            #previewContainer {{
+                background-color: {get_color('background_primary')};
+                border: 1px solid {get_color('border_light')};
+                border-radius: {px(BORDER_RADIUS['lg'])};
+            }}
+        """
+
+    def _apply_preview_container_style(self):
+        """Apply current theme style to preview container."""
+        self.preview_container.setStyleSheet(self._get_preview_container_style())
+
+    def _get_overlay_style(self) -> str:
+        """Generate overlay style with current theme colors."""
+        if ThemeManager.get_theme() == "light":
+            bg = "rgba(250, 250, 249, 0.9)"
+        else:
+            bg = "rgba(23, 23, 23, 0.9)"
+        return f"""
+            #overlayWidget {{
+                background-color: {bg};
+                border-radius: {px(BORDER_RADIUS["md"])};
+            }}
+        """
+
+    def _apply_overlay_style(self):
+        """Apply current theme style to overlay."""
+        self.overlay.setStyleSheet(self._get_overlay_style())
+
+    def _get_processing_label_style(self) -> str:
+        """Generate processing label style with current theme colors."""
+        if ThemeManager.get_theme() == "light":
+            bg = "rgba(255, 255, 255, 0.9)"
+        else:
+            bg = "rgba(31, 31, 31, 0.9)"
+        return f"""
+            QLabel {{
+                color: {get_color('text_primary')};
+                font-size: {px(TYPOGRAPHY_SCALE["caption"]["size_px"])};
+                font-weight: {TYPOGRAPHY_SCALE["caption"]["weight"]};
+                padding: {px(SPACING_SCALE["md"])} {px(SPACING_SCALE["lg"])};
+                background-color: {bg};
+                border-radius: {px(BORDER_RADIUS["md"])};
+                border: 1px solid {get_color('border_light')};
+            }}
+        """
+
+    def _apply_processing_label_style(self):
+        """Apply current theme style to processing label."""
+        self.processing_label.setStyleSheet(self._get_processing_label_style())
+
     def _setup_overlay(self):
         """Sets up the overlay widget for processing indication."""
         # Keep the overlay logic, but hide it initially
         self.overlay = QWidget(self.centralWidget()) # Parent is the central widget
         self.overlay.setObjectName("overlayWidget")
-        self.overlay.setStyleSheet(f"""
-            #overlayWidget {{
-                background-color: rgba(242, 242, 247, 0.85); /* Semi-transparent background */
-                border-radius: {px(BORDER_RADIUS["md"])}; /* Match parent container */
-            }}
-        """)
+        self._apply_overlay_style()
         self.overlay.hide()
 
         overlay_layout = QVBoxLayout(self.overlay)
@@ -765,17 +1066,7 @@ class NLCalendarCreator(QMainWindow):
 
         # Simplified processing indicator
         self.processing_label = QLabel("Processing...") # Simple text
-        self.processing_label.setStyleSheet(f"""
-            QLabel {{
-                color: {COLORS['text_primary']};
-                font-size: {px(TYPOGRAPHY_SCALE["caption"]["size_px"])};
-                font-weight: {TYPOGRAPHY_SCALE["caption"]["weight"]};
-                padding: {px(SPACING_SCALE["md"])} {px(SPACING_SCALE["lg"])};
-                background-color: rgba(255, 255, 255, 0.7); /* White-ish box */
-                border-radius: {px(BORDER_RADIUS["md"])};
-                border: 1px solid {COLORS['border_light']};
-            }}
-        """)
+        self._apply_processing_label_style()
         self.processing_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         overlay_layout.addWidget(self.processing_label)
 
@@ -788,6 +1079,27 @@ class NLCalendarCreator(QMainWindow):
         super().resizeEvent(event)
         # Ensure overlay covers the central widget
         self.overlay.resize(self.centralWidget().size())
+
+    def keyPressEvent(self, event: QKeyEvent):
+        """Handle keyboard shortcuts"""
+        # Cmd+Enter (Mac) or Ctrl+Enter (Windows/Linux) to submit
+        if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier or \
+               event.modifiers() & Qt.KeyboardModifier.MetaModifier:
+                if self.create_button.isEnabled():
+                    self.process_event()
+                event.accept()
+                return
+
+        # Esc to clear input (no confirmation - just clear!)
+        if event.key() == Qt.Key.Key_Escape:
+            self.text_input.clear()
+            self.image_area.reset_state()
+            event.accept()
+            return
+
+        # Pass other events to parent
+        super().keyPressEvent(event)
 
     # Add placeholder methods required by signals if they were removed/changed
     def update_status(self, message: str):
@@ -819,32 +1131,38 @@ class NLCalendarCreator(QMainWindow):
          self.text_input.clear()
          # This will trigger the textChanged signal and reset the preview via update_live_preview()
 
+    def _clear_all_inputs(self):
+         """Clear all input fields (text and images)"""
+         self.text_input.clear()
+         self.image_area.reset_state()
+
     def process_event(self):
         """Process the natural language input and create calendar event"""
-        # Initialize API client on first use
-        if not self.api_client:
-            api_key = os.environ.get('GEMINI_API_KEY')
-            if not api_key:
-                QMessageBox.critical(
-                    self,
-                    "API Key Error",
-                    "GEMINI_API_KEY environment variable not set. Please set it before continuing."
-                )
-                return
-            try:
-                self.api_client = CalendarAPIClient(api_key=api_key)
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "API Client Error",
-                    f"Failed to initialize the API client: {str(e)}"
-                )
-                return
+        # Thread-safe API client initialization on first use
+        with self._api_client_lock:
+            if not self.api_client:
+                api_key = os.environ.get('GEMINI_API_KEY')
+                if not api_key:
+                    QMessageBox.critical(
+                        self,
+                        "API Key Error",
+                        "GEMINI_API_KEY environment variable not set. Please set it before continuing."
+                    )
+                    return
+                try:
+                    self.api_client = CalendarAPIClient(api_key=api_key)
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "API Client Error",
+                        f"Failed to initialize the API client: {str(e)}"
+                    )
+                    return
 
         # Get text from the proper QTextEdit input
         event_description = self.text_input.toPlainText().strip()
         has_images = bool(self.image_area.image_data)
-        
+
         # Case 1: No text AND no images
         if not event_description and not has_images:
             QMessageBox.warning(
@@ -857,59 +1175,149 @@ class NLCalendarCreator(QMainWindow):
             )
             self.text_input.setFocus()
             return
+
+        # Case 2: Text-only validation - check for event-like content
+        if event_description and not has_images:
+            text_lower = event_description.lower()
+
+            # Check for date/time indicators
+            date_indicators = ["today", "tomorrow", "monday", "tuesday", "wednesday", "thursday",
+                             "friday", "saturday", "sunday", "next", "this", "week", "january",
+                             "february", "march", "april", "may", "june", "july", "august",
+                             "september", "october", "november", "december", "/", "-"]
+            time_indicators = ["am", "pm", ":", "o'clock", "morning", "afternoon", "evening", "night"]
+            event_indicators = ["meeting", "appointment", "lunch", "dinner", "call", "conference",
+                              "event", "party", "class", "workshop", "session"]
+
+            has_date = any(indicator in text_lower for indicator in date_indicators)
+            has_time = any(indicator in text_lower for indicator in time_indicators)
+            has_event_word = any(indicator in text_lower for indicator in event_indicators)
+
+            # Warn if it doesn't look like an event description
+            if not (has_date or has_time or has_event_word):
+                reply = QMessageBox.question(
+                    self,
+                    "Doesn't Look Like An Event",
+                    "Your text doesn't seem to include date, time, or event keywords.\n\n"
+                    "Tip: Try including details like:\n"
+                    "• When: 'tomorrow', 'Friday', 'Jan 15'\n"
+                    "• Time: '3pm', '14:30', 'morning'\n"
+                    "• What: 'meeting', 'lunch', 'appointment'\n\n"
+                    "Continue anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
         
         # At this point, we have either text, images, or both - proceed with processing
         self.enable_ui_signal.emit(False)
 
-        image_payloads = [copy.deepcopy(attachment) for attachment in self.image_area.image_data]
-
-        # Pass event description and image data to the thread
-        worker = threading.Thread(
-            target=self._create_event_thread,
-            args=(event_description, image_payloads),
-            daemon=True
-        )
-
+        # Acquire lock before accessing shared image data to prevent race conditions
         with self._threads_lock:
-            self._active_threads.add(worker)
+            image_payloads = [copy.deepcopy(attachment) for attachment in self.image_area.image_data]
 
-        worker.start()
+            # Submit to executor instead of creating raw threads
+            # This ensures proper cleanup on app exit
+            future = self._executor.submit(
+                self._create_event_thread,
+                event_description,
+                image_payloads
+            )
+            self._active_futures.add(future)
+
+            # Add callback to clean up the future when done
+            future.add_done_callback(self._on_future_done)
 
     def _create_event_thread(self, event_description: str, image_data: List[ImageAttachmentPayload]):
         try:
-            # Get API client
+            # Get API client - should be initialized in process_event() before this thread starts
             if not self.api_client:
-                # Re-add API key check/initialization if necessary (assuming it's handled elsewhere or already initialized)
-                # ... (initialization logic potentially needed here) ...
-                # For now, assume self.api_client exists
-                pass
+                error_msg = "API client not initialized. Please restart the application."
+                self.update_status_signal.emit(error_msg)
+                self.enable_ui_signal.emit(True)
+                return
 
             prepared_images: List[tuple[str, str, str]] = []
+            failed_images = 0
             for attachment in image_data:
                 try:
                     prepared_images.append(attachment.materialize())
                 except Exception as exc:
                     logger.warning("Skipping image attachment due to error: %s", exc)
+                    failed_images += 1
 
-            self.update_status_signal.emit("Requesting event details...")
-            ics_strings: Optional[List[str]] = self.api_client.create_calendar_event(
+            # Warn user about failed images and wait for decision
+            USER_DECISION_TIMEOUT = 30  # seconds - reasonable timeout for user interaction
+            if failed_images > 0:
+                warning_msg = f"{failed_images} image(s) couldn't be processed. Continue with remaining images?"
+                decision_queue: "queue.Queue[bool]" = queue.Queue(maxsize=1)
+                self.image_warning_signal.emit(warning_msg, failed_images, decision_queue)
+                try:
+                    should_continue = decision_queue.get(timeout=USER_DECISION_TIMEOUT)
+                except queue.Empty:
+                    # Timeout - default to safe behavior (cancel) rather than raising
+                    logger.warning("User did not respond to image warning dialog within %d seconds", USER_DECISION_TIMEOUT)
+                    self.update_status_signal.emit("Event creation cancelled (dialog timeout)")
+                    return
+                if not should_continue:
+                    self.update_status_signal.emit("Event creation cancelled")
+                    return
+
+            self.update_status_signal.emit("Requesting event details from AI...")
+            events: Optional[List[Dict]] = self.api_client.get_event_data(
                 event_description,
                 prepared_images,
                 lambda message: self.update_status_signal.emit(message)
             )
 
-            if not ics_strings:
+            if not events:
                 raise Exception("API returned no event data or failed after retries")
+
+            logger.debug("Received %s event(s) from API.", len(events))
+
+            # Finalize events on the main thread immediately (no confirmation dialog)
+            self.finalize_events_signal.emit(events)
+
+        except Exception as e:
+            logger.exception("Error in _create_event_thread")
+            friendly_error = get_user_friendly_error(e)
+            self.update_status_signal.emit("Error occurred")
+            QTimer.singleShot(0, lambda: self._show_error(friendly_error))
+        finally:
+            with self._threads_lock:
+                self._active_threads.discard(threading.current_thread())
+            self.enable_ui_signal.emit(True)
+
+    def _finalize_events(self, events: List[Dict]):
+        """Build ICS files and open calendar (runs on main thread)"""
+        try:
+            self.enable_ui_signal.emit(False)
+            self.update_status_signal.emit("Creating calendar events...")
+
+            # Build ICS strings from the edited events
+            ics_strings, warnings = build_ics_from_events(events)
+
+            if not ics_strings:
+                raise Exception("Failed to create ICS files from event data")
+
+            # Show warnings if any
+            if warnings:
+                warning_text = "\n\n".join(warnings)
+                QMessageBox.warning(
+                    self,
+                    "Event Creation Warnings",
+                    f"Events created with warnings:\n\n{warning_text}",
+                    QMessageBox.StandardButton.Ok
+                )
 
             event_count = len(ics_strings)
             event_text = "event" if event_count == 1 else "events"
-            self.update_status_signal.emit(f"Processing {event_count} {event_text}...")
-            logger.debug("Received %s wrapped ICS string(s) from API.", event_count)
+            logger.debug("Generated %s ICS string(s).", event_count)
 
             # Merge all ICS payloads while preserving metadata/timezones.
             final_ics_content = combine_ics_strings(ics_strings)
 
-            logger.debug("Final combined ICS content (first 10000 chars):\n------\n%s\n------", final_ics_content[:10000])
+            logger.debug("Final combined ICS content (first 500 chars):\n------\n%s\n------", final_ics_content[:500])
 
             # --- Create, open, and clean up the single temp file ---
             temp_path: Optional[str] = None # Explicitly define type
@@ -988,21 +1396,62 @@ class NLCalendarCreator(QMainWindow):
 
             # Final status update
             if successful_import_initiated:
-                self.update_status_signal.emit(f"Successfully initiated import for {event_count} {event_text}!")
-                self.clear_input_signal.emit()
+                success_msg = f"Successfully created {event_count} {event_text}!"
+                self.update_status_signal.emit(success_msg)
+                QTimer.singleShot(0, lambda: self._show_success(success_msg, event_count))
+                # DON'T auto-clear input - let user decide
                 if hasattr(self.image_area, 'reset_state'):
                     QTimer.singleShot(0, self.image_area.reset_state)
             # Error status is handled by emitted signals within the try/except blocks
 
         except Exception as e:
-            error_message = f"Error creating events: {str(e)}"
-            logger.exception("Error in _create_event_thread")
-            self.update_status_signal.emit(error_message)
-            QTimer.singleShot(0, lambda: self._show_error(error_message))
+            logger.exception("Error in _finalize_events")
+            friendly_error = get_user_friendly_error(e)
+            self.update_status_signal.emit("Error occurred")
+            self._show_error(friendly_error)
         finally:
-            with self._threads_lock:
-                self._active_threads.discard(threading.current_thread())
             self.enable_ui_signal.emit(True)
+
+    def _show_image_warning(self, message: str, failed_count: int, decision_queue: queue.Queue):
+        """Show warning about failed image uploads and communicate decision back to worker thread."""
+        reply = QMessageBox.warning(
+            self,
+            "Image Upload Warning",
+            message,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        decision_queue.put(reply == QMessageBox.StandardButton.Ok)
+
+    def _show_success(self, message: str, event_count: int):
+        """Show success message after events created"""
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Information)
+        msg_box.setWindowTitle("Success")
+        msg_box.setText(message)
+        msg_box.setInformativeText(f"Check your calendar application to see the {event_count} event(s).")
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.setAccessibleName("Success Dialog")
+        msg_box.setAccessibleDescription(f"{message}. Check your calendar application to see the {event_count} event(s).")
+        msg_box.setStyleSheet(f"""
+            QMessageBox {{
+                background-color: {get_color("background_primary")};
+            }}
+            QLabel {{
+                color: {get_color("text_primary")};
+                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+            }}
+            QPushButton {{
+                background-color: {get_color("accent")};
+                color: white;
+                border-radius: {px(BORDER_RADIUS["sm"])};
+                padding: {px(SPACING_SCALE["xs"])} {px(SPACING_SCALE["md"])};
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background-color: {get_color("accent_hover")};
+            }}
+        """)
+        msg_box.exec()
 
     @pyqtSlot(str) # Decorate as a slot invokable via invokeMethod
     def _schedule_temp_file_deletion(self, file_path: str):
@@ -1024,7 +1473,41 @@ class NLCalendarCreator(QMainWindow):
 
     def _show_error(self, message: str):
         """Show error message box (called from main thread)"""
-        QMessageBox.critical(self, "Error", message)
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Critical)
+        msg_box.setWindowTitle("Error")
+        msg_box.setText(message)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.setAccessibleName("Error Dialog")
+        msg_box.setAccessibleDescription(f"An error occurred: {message}")
+        msg_box.exec()
+
+    def _on_future_done(self, future: Future):
+        """Callback when a background task completes - cleans up tracking."""
+        with self._threads_lock:
+            self._active_futures.discard(future)
+
+        # Log any unhandled exceptions from the future
+        try:
+            exc = future.exception()
+            if exc is not None:
+                logger.error("Background task failed with exception: %s", exc)
+        except Exception:
+            pass  # Future was cancelled or already retrieved
+
+    def closeEvent(self, event: QCloseEvent):
+        """Handle window close - gracefully shutdown the executor."""
+        logger.debug("Application closing, shutting down executor...")
+
+        # Shutdown the executor and wait for pending tasks
+        # Use wait=True to allow tasks to complete, but with a timeout
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+        # Stop any pending timers
+        if hasattr(self, '_preview_timer') and self._preview_timer.isActive():
+            self._preview_timer.stop()
+
+        super().closeEvent(event)
 
     def _schedule_preview_update(self):
         if self._preview_timer.isActive():
@@ -1203,14 +1686,32 @@ class NLCalendarCreator(QMainWindow):
         return date_str.title()  # Return as-is but capitalize
 
 
+def get_resource_path(filename: str) -> str:
+    """Get absolute path to resource, works for dev and bundled app."""
+    if getattr(sys, 'frozen', False):
+        # Running as bundled executable
+        base_path = Path(sys._MEIPASS)
+    else:
+        # Running in development
+        base_path = Path(__file__).parent
+    return str(base_path / filename)
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    
+
     # Set the application-wide icon
-    app.setWindowIcon(QIcon("calendar-svg-simple.png"))
-    
+    icon_path = get_resource_path("calendar-icon.png")
+    if Path(icon_path).exists():
+        app.setWindowIcon(QIcon(icon_path))
+    else:
+        # Fallback to old icon if new one doesn't exist yet
+        fallback_path = get_resource_path("calendar-svg-simple.png")
+        if Path(fallback_path).exists():
+            app.setWindowIcon(QIcon(fallback_path))
+
     window = NLCalendarCreator()
     window.show()
-    
+
     # Start the main event loop
     sys.exit(app.exec())
