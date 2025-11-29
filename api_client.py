@@ -1,7 +1,9 @@
 import os
+import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import time
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 from string import Formatter
 import json
 import uuid
@@ -11,6 +13,119 @@ from icalendar import Calendar, Event, vText, Alarm
 import re
 from dateutil import parser
 import tzlocal
+
+from exceptions import (
+    CalendarAPIError,
+    TimezoneResolutionError,
+    EventValidationError,
+    ImageProcessingError,
+    APIResponseError,
+    RetryExhaustedError,
+)
+
+logger = logging.getLogger(__name__)
+
+# Configuration constants
+API_TIMEOUT_SECONDS = 60  # Timeout for API calls
+MAX_BACKOFF_SECONDS = 10  # Cap exponential backoff
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_BASE_DELAY = 1.0
+
+# Error classification for smart retry logic
+# These errors should NOT be retried (permanent failures)
+NON_RETRYABLE_ERROR_PATTERNS = [
+    "invalid api key",
+    "api_key_invalid",
+    "permission denied",
+    "quota exceeded",
+    "invalid argument",
+    "authentication",
+    "unauthorized",
+]
+
+# These errors SHOULD be retried (transient failures)
+RETRYABLE_ERROR_PATTERNS = [
+    "timeout",
+    "deadline exceeded",
+    "service unavailable",
+    "resource exhausted",
+    "connection",
+    "network",
+    "temporarily unavailable",
+]
+
+
+def _is_retryable_error(error: Exception) -> bool:
+    """Determine if an error should be retried based on error type and message."""
+    error_str = str(error).lower()
+    error_type = type(error).__name__.lower()
+
+    # Check for non-retryable patterns first (explicit deny)
+    for pattern in NON_RETRYABLE_ERROR_PATTERNS:
+        if pattern in error_str or pattern in error_type:
+            return False
+
+    # Check for retryable patterns (explicit allow)
+    for pattern in RETRYABLE_ERROR_PATTERNS:
+        if pattern in error_str or pattern in error_type:
+            return True
+
+    # Default: retry for unknown errors (safer for transient issues)
+    # But log a warning for investigation
+    logger.debug("Unknown error type, defaulting to retry: %s - %s", type(error).__name__, error)
+    return True
+
+
+@dataclass
+class CalendarEvent:
+    """Type-safe representation of a calendar event."""
+    uid: str
+    title: str
+    start_time: str
+    end_time: str
+    date: str
+    timezone: str
+    description: Optional[str] = None
+    location: Optional[str] = None
+
+    # Required fields for validation
+    REQUIRED_FIELDS = {"uid", "title", "start_time", "end_time", "date", "timezone"}
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "CalendarEvent":
+        """Create a CalendarEvent from a dictionary, validating required fields."""
+        missing = cls.REQUIRED_FIELDS - set(data.keys())
+        if missing:
+            raise EventValidationError(
+                missing_fields=missing,
+                event_title=data.get('title', 'Unknown')
+            )
+        return cls(
+            uid=data.get("uid") or str(uuid.uuid4()),
+            title=data["title"],
+            start_time=data["start_time"],
+            end_time=data["end_time"],
+            date=data["date"],
+            timezone=data.get("timezone", "local"),
+            description=data.get("description"),
+            location=data.get("location"),
+        )
+
+    def to_dict(self) -> Dict:
+        """Convert back to a dictionary for compatibility."""
+        result = {
+            "uid": self.uid,
+            "title": self.title,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "date": self.date,
+            "timezone": self.timezone,
+        }
+        if self.description:
+            result["description"] = self.description
+        if self.location:
+            result["location"] = self.location
+        return result
 
 
 class CalendarAPIClient:
@@ -96,28 +211,29 @@ Current timezone: {user_timezone}
             generation_config=self.generation_config,
             system_instruction=self.SYSTEM_PROMPT
         )
-        self.base_delay = 1
-        self.max_retries = 5
+        self.base_delay = DEFAULT_BASE_DELAY
+        self.max_retries = DEFAULT_MAX_RETRIES
+        self.timeout_seconds = API_TIMEOUT_SECONDS
 
     def upload_to_gemini(self, path, mime_type=None):
         """Uploads the given file to Gemini."""
         # Add basic check for file existence
         if not os.path.exists(path):
-             print(f"Error: File not found for upload: {path}")
+             logger.error("File not found for upload: %s", path)
              raise FileNotFoundError(f"File not found: {path}")
         try:
             file = self.genai.upload_file(path, mime_type=mime_type)
-            print(f"Uploaded file '{file.display_name}' as: {file.uri}")
+            logger.debug("Uploaded file '%s' as: %s", file.display_name, file.uri)
             return file
         except Exception as e:
-            print(f"Error uploading file {path}: {e}")
+            logger.error("Error uploading file %s: %s", path, e)
             raise # Re-raise the exception after logging
 
-    def create_calendar_event(self, event_description: str, image_data: list[tuple[str, str, str]],
-                              status_callback: callable) -> Optional[List[str]]:
+    def get_event_data(self, event_description: str, image_data: list[tuple[str, str, str]],
+                       status_callback: callable) -> Optional[List[Dict]]:
         """
-        Create calendar event(s) by getting JSON from the LLM and building ICS files.
-        Returns a list of ICS file content strings.
+        Get event data from the LLM without building ICS files.
+        Returns a list of event dictionaries for review/editing.
         """
         # If no text is provided but there are attached images, use a default description.
         if not event_description and image_data:
@@ -141,8 +257,8 @@ Current timezone: {user_timezone}
         for attempt in range(self.max_retries):
             try:
                 status_callback(f"Attempting to get event details... (Try {attempt + 1}/{self.max_retries})")
-                print(f"DEBUG: Attempt {attempt + 1}/{self.max_retries}")
-                print("DEBUG: Generated API prompt (first 200 chars):", api_prompt[:200])
+                logger.debug("Attempt %d/%d", attempt + 1, self.max_retries)
+                logger.debug("Generated API prompt (first 200 chars): %s", api_prompt[:200])
 
                 # Prepare chat history (add any uploaded image parts if images are provided)
                 history = []
@@ -156,10 +272,9 @@ Current timezone: {user_timezone}
                                 uploaded_file = self.upload_to_gemini(file_path, mime_type=mime_type)
                                 image_parts.append(uploaded_file)
                             except Exception as upload_err:
-                                print(f"Warning: Failed to upload image {file_path}: {upload_err}")
-                                # Optionally inform the user or log this more formally
+                                logger.warning("Failed to upload image %s: %s", file_path, upload_err)
                         else:
-                             print(f"Warning: Image file not found, skipping: {file_path}")
+                             logger.warning("Image file not found, skipping: %s", file_path)
 
                     if image_parts: # Only add history if images were successfully prepared
                         history.append({
@@ -182,16 +297,17 @@ Current timezone: {user_timezone}
                              response_text = "".join(part.text for part in message.parts if hasattr(part, 'text'))
                         else:
                              response_text = str(message) # Fallback if no parts or parts have no text
-                    except Exception:
+                    except Exception as e:
+                         logger.warning("Failed to extract text from message parts: %s", e)
                          response_text = str(message) # Fallback to string representation
 
                 # Handle case where response_text might still be None or empty after attempts
                 if not response_text:
-                     print("DEBUG: Received empty response from API.")
+                     logger.debug("Received empty response from API.")
                      # Decide whether to retry or raise an error
                      raise ValueError("Received empty response from API")
 
-                print("DEBUG: Raw API Response:", response_text)
+                logger.debug("Raw API Response: %s", response_text)
 
                 # Remove potential markdown code block fences
                 cleaned_response_text = response_text.strip().removeprefix("```json").removesuffix("```").strip()
@@ -200,53 +316,90 @@ Current timezone: {user_timezone}
                 try:
                     events = json.loads(cleaned_response_text) # raises on bad JSON
                 except json.JSONDecodeError as json_err:
-                    print(f"DEBUG: Failed to decode JSON: {json_err}")
-                    print(f"DEBUG: Received text was: {cleaned_response_text}")
+                    logger.debug("Failed to decode JSON: %s", json_err)
+                    logger.debug("Received text was: %s", cleaned_response_text)
                     # Reraise or handle specific retry logic for bad JSON format
                     raise ValueError(f"LLM returned invalid JSON: {json_err}") from json_err
 
-                # Build ICS strings from the parsed events
-                ics_strings = build_ics_from_events(events) # list[str]
-
-                print(f"DEBUG: Successfully parsed {len(events)} event(s) and generated {len(ics_strings)} ICS strings.")
-                status_callback(f"Successfully processed {len(ics_strings)} event(s).")
-                return ics_strings # Return the list of ICS strings
+                logger.debug("Successfully parsed %d event(s).", len(events))
+                status_callback(f"Successfully extracted {len(events)} event(s).")
+                return events # Return the list of event dictionaries
 
             except Exception as e:
-                print(f"DEBUG: Exception on attempt {attempt + 1}: {e}")
+                logger.debug("Exception on attempt %d: %s (%s)", attempt + 1, e, type(e).__name__)
+
+                # Check if this error should be retried
+                if not _is_retryable_error(e):
+                    logger.debug("Non-retryable error detected, not retrying: %s", type(e).__name__)
+                    status_callback(f"Error: {type(e).__name__} - this error cannot be retried.")
+                    raise
+
                 if attempt < self.max_retries - 1:
-                    delay = self.base_delay * (2 ** attempt)
-                    status_callback(f"Error occurred ({type(e).__name__}), retrying in {delay} seconds...")
-                    print(f"DEBUG: Retrying in {delay} seconds...")
+                    # Cap the exponential backoff to prevent excessive waits
+                    delay = min(self.base_delay * (2 ** attempt), MAX_BACKOFF_SECONDS)
+                    status_callback(f"Error occurred ({type(e).__name__}), retrying in {delay:.0f} seconds...")
+                    logger.debug("Retrying in %.0f seconds...", delay)
                     time.sleep(delay)
                     continue
-                print("DEBUG: Max retries reached. Raising exception.")
-                status_callback("Error: Max retries reached. Failed to create event.")
-                # Re-raise the last exception to be caught by the caller
-                raise Exception(f"Failed to create calendar event after {self.max_retries} retries: {e}") from e
 
-        print("DEBUG: Failed to create calendar event after retries.")
+                logger.debug("Max retries reached. Raising exception.")
+                status_callback("Error: Max retries reached. Failed to create event.")
+                # Raise custom retry exhausted exception
+                raise RetryExhaustedError(attempts=self.max_retries, last_error=e) from e
+
+        logger.debug("Failed to create calendar event after retries.")
         status_callback("Error: Failed to create event after retries.")
         return None # Explicitly return None if loop completes without success
 
+    def create_calendar_event(self, event_description: str, image_data: list[tuple[str, str, str]],
+                              status_callback: callable) -> str:
+        """
+        Backwards-compatible helper that returns ICS text for the requested events.
+        Internally delegates to get_event_data and build_ics_from_events.
+        """
+        events = self.get_event_data(event_description, image_data, status_callback)
+        if not events:
+            raise Exception("API returned no event data.")
+
+        ics_strings, warnings = build_ics_from_events(events)
+        if not ics_strings:
+            raise Exception("Failed to build ICS content from event data.")
+
+        if warnings:
+            warning_text = " | ".join(warnings)
+            try:
+                status_callback(f"Warnings: {warning_text}")
+            except Exception as e:
+                logger.warning("Failed to send status callback for warnings: %s. Warnings: %s", e, warning_text)
+
+        return "\r\n".join(ics_strings)
+
 
 # --- ICS Builder Function (outside the class) ---
-def build_ics_from_events(events: list[dict]) -> list[str]:
-    """Builds a list of .ics file content strings (CRLF-terminated) from event data."""
+def build_ics_from_events(events: list[dict]) -> tuple[list[str], list[str]]:
+    """
+    Builds a list of .ics file content strings (CRLF-terminated) from event data.
+    Returns: (ics_strings, warnings) tuple
+    """
     out = []
+    warnings = []
     if not isinstance(events, list):
-        print(f"Error: Expected a list of events, but got {type(events)}")
+        logger.error("Expected a list of events, but got %s", type(events))
         if isinstance(events, dict):
              events = [events] # Try processing it as a single event list
         else:
-             return [] # Return empty if it's not a list or dict
+             return [], [] # Return empty if it's not a list or dict
 
     for i, ev in enumerate(events):
         try:
             # Basic validation of required keys
             required_keys = {"uid", "title", "start_time", "end_time", "date", "timezone"}
-            if not required_keys.issubset(ev.keys()):
-                print(f"Warning: Skipping event {i+1} due to missing required keys ({required_keys - set(ev.keys())})")
+            missing_keys = required_keys - set(ev.keys())
+            if missing_keys:
+                event_title = ev.get('title', f'Event {i+1}')
+                warning_msg = f"Skipping '{event_title}' - missing required fields: {missing_keys}"
+                logger.warning(warning_msg)
+                warnings.append(warning_msg)
                 continue
 
             cal = Calendar()
@@ -304,12 +457,15 @@ def build_ics_from_events(events: list[dict]) -> list[str]:
 
                 try:
                     local_tz = pytz.timezone(tz_name)
-                except Exception:
+                except pytz.UnknownTimeZoneError:
                     # Last-ditch attempt with dateutil (may return fixed offset)
                     from dateutil import tz as du_tz
-                    local_tz = du_tz.gettz(tz_name) or pytz.utc
-                    if local_tz is pytz.utc:
-                        print(f"Warning: Could not resolve timezone '{tz_str_raw}', defaulting to UTC")
+                    local_tz = du_tz.gettz(tz_name)
+                    if local_tz is None:
+                        local_tz = pytz.utc
+                        warning_msg = f"Couldn't resolve timezone '{tz_str_raw}' for event '{ev.get('title', 'Unknown')}' - using UTC. Please verify the time in your calendar."
+                        logger.warning(warning_msg)
+                        warnings.append(warning_msg)
                 
                 # Parse times and combine with date
                 start_time = parser.parse(start_time_str).time()
@@ -341,7 +497,7 @@ def build_ics_from_events(events: list[dict]) -> list[str]:
                 end_dt_utc = end_dt.astimezone(pytz.utc)
                 
             except Exception as dt_err:
-                print(f"Warning: Skipping event '{ev.get('title', 'Unknown')}' due to date/time parsing error: {dt_err}")
+                logger.warning("Skipping event '%s' due to date/time parsing error: %s", ev.get('title', 'Unknown'), dt_err)
                 continue
 
             ve.add("DTSTART", start_dt_utc)
@@ -374,6 +530,8 @@ def build_ics_from_events(events: list[dict]) -> list[str]:
             out.append(crlf_ical)
 
         except Exception as build_err:
-            print(f"Error building ICS for event {i+1} ({ev.get('title', 'Unknown Title')}): {build_err}")
+            error_msg = f"Error building ICS for event {i+1} ({ev.get('title', 'Unknown Title')}): {build_err}"
+            logger.error(error_msg)
+            warnings.append(error_msg)
 
-    return out 
+    return out, warnings 
