@@ -5,3 +5,4 @@ icalendar>=5.0.0
 pytz>=2023.3
 python-dateutil>=2.8.0
 tzlocal>=4.0
+python-dotenv>=1.0.0

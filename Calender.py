@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, Future
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QTextEdit, QPushButton, QLabel, QMessageBox,
-                           QHBoxLayout, QSizePolicy)
-from PyQt6.QtGui import QIcon, QDragEnterEvent, QDropEvent, QKeyEvent, QCloseEvent
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, QBuffer, pyqtSlot, Q_ARG, QByteArray, QEvent
+                           QHBoxLayout, QSizePolicy, QDialog, QLineEdit)
+from PyQt6.QtGui import QIcon, QDragEnterEvent, QDropEvent, QKeyEvent, QCloseEvent, QDesktopServices
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QMetaObject, QBuffer, pyqtSlot, Q_ARG, QByteArray, QEvent, QUrl
 from typing import Optional, List, Dict
 import threading
 import queue
@@ -23,6 +23,7 @@ import uuid
 import shutil
 import dateutil.parser
 from icalendar import Calendar
+from dotenv import load_dotenv, set_key
 
 from api_client import CalendarAPIClient, build_ics_from_events
 
@@ -30,33 +31,9 @@ from api_client import CalendarAPIClient, build_ics_from_events
 logger = logging.getLogger(__name__)
 
 
-def get_user_friendly_error(error: Exception) -> str:
-    """Convert technical errors to user-friendly messages"""
-    error_str = str(error).lower()
-    error_type = type(error).__name__
-
-    ERROR_MAPPINGS = {
-        "invalid api key": "Your API key isn't working. Please check your GEMINI_API_KEY environment variable.",
-        "api key": "There's an issue with your API key. Please verify it's set correctly.",
-        "rate limit": "Too many requests. Please wait a minute and try again.",
-        "quota": "API quota exceeded. You may need to wait or upgrade your API plan.",
-        "network": "Can't reach the server. Please check your internet connection.",
-        "connection": "Network connection failed. Check your internet and try again.",
-        "timeout": "Request timed out. The server might be busy - please try again.",
-        "json": "AI returned unexpected format. Try rephrasing your description or try again.",
-        "permission": "Permission denied. Check file permissions and try again.",
-        "file not found": "File not found. The image may have been moved or deleted.",
-        "no event data": "Couldn't extract event details. Try being more specific (include date, time, title).",
-    }
-
-    # Check for matching error patterns
-    for pattern, friendly_msg in ERROR_MAPPINGS.items():
-        if pattern in error_str:
-            return f"{friendly_msg}\n\nTechnical details: {error_type}: {str(error)}"
-
-    # Default message for unknown errors
-    return f"Something went wrong.\n\nTechnical details: {error_type}: {str(error)}\n\nPlease try again or contact support if this persists."
-
+# =============================================================================
+# Design System - Theme Support
+# =============================================================================
 
 def px(value: int) -> str:
     """Return a CSS pixel value."""
@@ -78,6 +55,12 @@ SPACING_SCALE = {
     "lg": 32,
     "xl": 48,
     "xxl": 64,
+}
+
+BORDER_RADIUS = {
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
 }
 
 # Anthropic Design System - Dual Theme Palettes
@@ -118,6 +101,7 @@ DARK_PALETTE = {
     "warning": "#F59E0B",
     "error": "#EF4444",
 }
+
 
 # Thread-safe theme management
 class ThemeManager:
@@ -162,6 +146,7 @@ def toggle_theme() -> str:
     """Toggle between light and dark theme. Returns new theme name."""
     return ThemeManager.toggle_theme()
 
+
 # Backwards compatibility - COLORS dict that reads from current palette
 class _DynamicColors:
     """Dynamic color accessor that reads from current theme."""
@@ -171,14 +156,424 @@ class _DynamicColors:
         result = get_color(key)
         return result if result != "#FF00FF" else default
 
+
 COLORS = _DynamicColors()
 
-# Design tokens
-BORDER_RADIUS = {
-    "sm": 8,
-    "md": 12,
-    "lg": 16,
-}
+
+# =============================================================================
+# API Key Management - Simple .env based configuration
+# =============================================================================
+
+def get_env_file_path() -> Path:
+    """Get the path to the .env file in the app directory."""
+    if getattr(sys, 'frozen', False):
+        # Running as bundled executable
+        return Path(sys._MEIPASS).parent / '.env'
+    else:
+        # Running in development
+        return Path(__file__).parent / '.env'
+
+
+def load_api_key() -> Optional[str]:
+    """
+    Load the Gemini API key from environment or .env file.
+    Priority: 1) Environment variable, 2) .env file
+    """
+    # First check environment variable (allows override)
+    env_key = os.environ.get('GEMINI_API_KEY')
+    if env_key:
+        return env_key
+
+    # Try loading from .env file
+    env_path = get_env_file_path()
+    if env_path.exists():
+        load_dotenv(env_path)
+        return os.environ.get('GEMINI_API_KEY')
+
+    return None
+
+
+def save_api_key(api_key: str) -> bool:
+    """Save the API key to the .env file."""
+    try:
+        env_path = get_env_file_path()
+
+        # Create .env file if it doesn't exist
+        if not env_path.exists():
+            env_path.touch()
+
+        # Save the key
+        set_key(str(env_path), 'GEMINI_API_KEY', api_key)
+
+        # Also set in current environment so app works immediately
+        os.environ['GEMINI_API_KEY'] = api_key
+
+        return True
+    except Exception as e:
+        logging.error("Failed to save API key: %s", e)
+        return False
+
+
+class APIKeySetupDialog(QDialog):
+    """
+    A friendly dialog to help users set up their Gemini API key.
+    Designed to be idiot-proof and guide users through the process.
+    Uses the app's theme system for consistent dark/light mode support.
+    """
+
+    GOOGLE_AI_STUDIO_URL = "https://aistudio.google.com/apikey"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Welcome - API Key Setup")
+        self.setMinimumWidth(520)
+        self.setModal(True)
+
+        self._setup_ui()
+        self._apply_theme()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(SPACING_SCALE["sm"])
+        layout.setContentsMargins(
+            SPACING_SCALE["lg"], SPACING_SCALE["lg"],
+            SPACING_SCALE["lg"], SPACING_SCALE["lg"]
+        )
+
+        # Welcome header
+        self.welcome_label = QLabel("Welcome to Calendar Event Creator!")
+        layout.addWidget(self.welcome_label)
+
+        # Explanation
+        self.explanation_label = QLabel(
+            "This app uses Google's Gemini AI to intelligently extract event details "
+            "from your text and images. To get started, you'll need a free API key."
+        )
+        self.explanation_label.setWordWrap(True)
+        layout.addWidget(self.explanation_label)
+
+        layout.addSpacing(SPACING_SCALE["xs"])
+
+        # Step 1
+        self.step1_header = QLabel("Step 1: Get your free API key")
+        layout.addWidget(self.step1_header)
+
+        self.step1_desc = QLabel("Click the button below to open Google AI Studio and create your key:")
+        self.step1_desc.setWordWrap(True)
+        layout.addWidget(self.step1_desc)
+
+        # Get API Key button (Google blue - consistent across themes)
+        self.get_key_btn = QPushButton("Open Google AI Studio (Free)")
+        self.get_key_btn.setMinimumHeight(44)
+        self.get_key_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.get_key_btn.clicked.connect(self._open_google_ai_studio)
+        layout.addWidget(self.get_key_btn)
+
+        layout.addSpacing(SPACING_SCALE["sm"])
+
+        # Step 2
+        self.step2_header = QLabel("Step 2: Paste your API key here")
+        layout.addWidget(self.step2_header)
+
+        self.step2_desc = QLabel("Copy the API key from Google AI Studio and paste it below:")
+        self.step2_desc.setWordWrap(True)
+        layout.addWidget(self.step2_desc)
+
+        # API Key input
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText("Paste your API key here (starts with 'AIza...')")
+        self.api_key_input.setMinimumHeight(48)
+        self.api_key_input.textChanged.connect(self._validate_input)
+        layout.addWidget(self.api_key_input)
+
+        # Validation message
+        self.validation_label = QLabel("")
+        self.validation_label.hide()
+        layout.addWidget(self.validation_label)
+
+        # Security note
+        self.security_note = QLabel(
+            "Your API key is stored locally in a .env file and never shared. "
+            "You can change it anytime from the app settings."
+        )
+        self.security_note.setWordWrap(True)
+        layout.addWidget(self.security_note)
+
+        layout.addSpacing(SPACING_SCALE["sm"])
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(SPACING_SCALE["sm"])
+
+        self.cancel_btn = QPushButton("Quit")
+        self.cancel_btn.setMinimumHeight(44)
+        self.cancel_btn.setMinimumWidth(100)
+        self.cancel_btn.clicked.connect(self.reject)
+
+        self.save_btn = QPushButton("Save & Continue")
+        self.save_btn.setMinimumHeight(44)
+        self.save_btn.setMinimumWidth(140)
+        self.save_btn.setEnabled(False)
+        self.save_btn.clicked.connect(self._save_and_continue)
+
+        button_layout.addStretch()
+        button_layout.addWidget(self.cancel_btn)
+        button_layout.addWidget(self.save_btn)
+
+        layout.addLayout(button_layout)
+
+    def _apply_theme(self):
+        """Apply current theme colors to all widgets."""
+        # Dialog background
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {get_color('background_primary')};
+            }}
+        """)
+
+        # Welcome header
+        self.welcome_label.setStyleSheet(f"""
+            QLabel {{
+                font-size: {px(TYPOGRAPHY_SCALE["title"]["size_px"])};
+                font-weight: {TYPOGRAPHY_SCALE["title"]["weight"]};
+                color: {get_color('text_primary')};
+                padding-bottom: {px(SPACING_SCALE["xs"])};
+            }}
+        """)
+
+        # Explanation text
+        self.explanation_label.setStyleSheet(f"""
+            QLabel {{
+                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                color: {get_color('text_secondary')};
+                line-height: {TYPOGRAPHY_SCALE["body"]["line_height"]};
+            }}
+        """)
+
+        # Step headers
+        step_header_style = f"""
+            QLabel {{
+                font-size: {px(TYPOGRAPHY_SCALE["headline"]["size_px"])};
+                font-weight: {TYPOGRAPHY_SCALE["headline"]["weight"]};
+                color: {get_color('text_primary')};
+                padding-top: {px(SPACING_SCALE["xs"])};
+            }}
+        """
+        self.step1_header.setStyleSheet(step_header_style)
+        self.step2_header.setStyleSheet(step_header_style)
+
+        # Step descriptions
+        step_desc_style = f"""
+            QLabel {{
+                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                color: {get_color('text_secondary')};
+            }}
+        """
+        self.step1_desc.setStyleSheet(step_desc_style)
+        self.step2_desc.setStyleSheet(step_desc_style)
+
+        # Google button (blue accent - works in both themes)
+        self.get_key_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #4285F4;
+                color: white;
+                border: none;
+                border-radius: {px(BORDER_RADIUS["md"])};
+                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                font-weight: 600;
+                padding: {px(SPACING_SCALE["sm"])} {px(SPACING_SCALE["md"])};
+            }}
+            QPushButton:hover {{
+                background-color: #5294FF;
+            }}
+            QPushButton:pressed {{
+                background-color: #3367D6;
+            }}
+        """)
+
+        # API Key input field
+        self.api_key_input.setStyleSheet(f"""
+            QLineEdit {{
+                border: 2px solid {get_color('border_medium')};
+                border-radius: {px(BORDER_RADIUS["md"])};
+                padding: {px(SPACING_SCALE["sm"])};
+                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                font-family: monospace;
+                background-color: {get_color('background_secondary')};
+                color: {get_color('text_primary')};
+            }}
+            QLineEdit:focus {{
+                border-color: {get_color('accent')};
+                background-color: {get_color('background_primary')};
+            }}
+            QLineEdit::placeholder {{
+                color: {get_color('text_placeholder')};
+            }}
+        """)
+
+        # Security note
+        self.security_note.setStyleSheet(f"""
+            QLabel {{
+                font-size: {px(TYPOGRAPHY_SCALE["caption"]["size_px"])};
+                color: {get_color('text_tertiary')};
+                font-style: italic;
+                padding-top: {px(SPACING_SCALE["xs"])};
+            }}
+        """)
+
+        # Cancel button (secondary style)
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {get_color('background_secondary')};
+                color: {get_color('text_primary')};
+                border: 1px solid {get_color('border_medium')};
+                border-radius: {px(BORDER_RADIUS["md"])};
+                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                font-weight: 500;
+                padding: {px(SPACING_SCALE["xs"])} {px(SPACING_SCALE["md"])};
+            }}
+            QPushButton:hover {{
+                background-color: {get_color('background_tertiary')};
+                border-color: {get_color('text_tertiary')};
+            }}
+            QPushButton:pressed {{
+                background-color: {get_color('border_light')};
+            }}
+        """)
+
+        # Save button (primary accent style)
+        self.save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {get_color('accent')};
+                color: white;
+                border: none;
+                border-radius: {px(BORDER_RADIUS["md"])};
+                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                font-weight: 600;
+                padding: {px(SPACING_SCALE["xs"])} {px(SPACING_SCALE["md"])};
+            }}
+            QPushButton:hover {{
+                background-color: {get_color('accent_hover')};
+            }}
+            QPushButton:pressed {{
+                background-color: {get_color('accent_pressed')};
+            }}
+            QPushButton:disabled {{
+                background-color: {get_color('accent_disabled')};
+                color: {get_color('text_tertiary')};
+            }}
+        """)
+
+        # Update validation label with current theme
+        self._update_validation_style()
+
+    def _update_validation_style(self, state: str = "hidden"):
+        """Update validation label style based on state."""
+        if state == "error":
+            self.validation_label.setStyleSheet(f"""
+                QLabel {{
+                    font-size: {px(TYPOGRAPHY_SCALE["caption"]["size_px"])};
+                    color: {get_color('error')};
+                    padding: {px(4)} 0;
+                }}
+            """)
+        elif state == "warning":
+            self.validation_label.setStyleSheet(f"""
+                QLabel {{
+                    font-size: {px(TYPOGRAPHY_SCALE["caption"]["size_px"])};
+                    color: {get_color('warning')};
+                    padding: {px(4)} 0;
+                }}
+            """)
+        elif state == "success":
+            self.validation_label.setStyleSheet(f"""
+                QLabel {{
+                    font-size: {px(TYPOGRAPHY_SCALE["caption"]["size_px"])};
+                    color: {get_color('success')};
+                    padding: {px(4)} 0;
+                }}
+            """)
+
+    def _open_google_ai_studio(self):
+        """Open Google AI Studio in the default browser."""
+        QDesktopServices.openUrl(QUrl(self.GOOGLE_AI_STUDIO_URL))
+
+    def _validate_input(self):
+        """Validate the API key input."""
+        key = self.api_key_input.text().strip()
+
+        if not key:
+            self.save_btn.setEnabled(False)
+            self.validation_label.hide()
+            return
+
+        # Basic validation - Gemini API keys start with "AIza" and are ~39 chars
+        if len(key) < 30:
+            self.validation_label.setText("API key seems too short. Please check you copied the full key.")
+            self._update_validation_style("error")
+            self.validation_label.show()
+            self.save_btn.setEnabled(False)
+            return
+
+        if not key.startswith("AIza"):
+            self.validation_label.setText("Gemini API keys typically start with 'AIza'. Please verify your key.")
+            self._update_validation_style("warning")
+            self.validation_label.show()
+            # Still allow saving - user might know better
+            self.save_btn.setEnabled(True)
+            return
+
+        # Looks valid
+        self.validation_label.setText("Looks good!")
+        self._update_validation_style("success")
+        self.validation_label.show()
+        self.save_btn.setEnabled(True)
+
+    def _save_and_continue(self):
+        """Save the API key and close the dialog."""
+        key = self.api_key_input.text().strip()
+
+        if save_api_key(key):
+            self.accept()
+        else:
+            QMessageBox.critical(
+                self,
+                "Error Saving Key",
+                "Failed to save the API key. Please check file permissions and try again."
+            )
+
+    def get_api_key(self) -> Optional[str]:
+        """Get the entered API key (only valid after dialog accepted)."""
+        return self.api_key_input.text().strip()
+
+
+def get_user_friendly_error(error: Exception) -> str:
+    """Convert technical errors to user-friendly messages"""
+    error_str = str(error).lower()
+    error_type = type(error).__name__
+
+    ERROR_MAPPINGS = {
+        "invalid api key": "Your API key isn't working. Please check your GEMINI_API_KEY environment variable.",
+        "api key": "There's an issue with your API key. Please verify it's set correctly.",
+        "rate limit": "Too many requests. Please wait a minute and try again.",
+        "quota": "API quota exceeded. You may need to wait or upgrade your API plan.",
+        "network": "Can't reach the server. Please check your internet connection.",
+        "connection": "Network connection failed. Check your internet and try again.",
+        "timeout": "Request timed out. The server might be busy - please try again.",
+        "json": "AI returned unexpected format. Try rephrasing your description or try again.",
+        "permission": "Permission denied. Check file permissions and try again.",
+        "file not found": "File not found. The image may have been moved or deleted.",
+        "no event data": "Couldn't extract event details. Try being more specific (include date, time, title).",
+    }
+
+    # Check for matching error patterns
+    for pattern, friendly_msg in ERROR_MAPPINGS.items():
+        if pattern in error_str:
+            return f"{friendly_msg}\n\nTechnical details: {error_type}: {str(error)}"
+
+    # Default message for unknown errors
+    return f"Something went wrong.\n\nTechnical details: {error_type}: {str(error)}\n\nPlease try again or contact support if this persists."
+
 
 SUPPORTED_IMAGE_EXTENSIONS = (
     ".png",
@@ -784,6 +1179,17 @@ class NLCalendarCreator(QMainWindow):
         button_layout = QHBoxLayout()
         button_layout.addStretch(1) # Push buttons to center
 
+        # Settings button (API key configuration)
+        self.settings_button = QPushButton()
+        self.settings_button.setFixedSize(36, 36)
+        self.settings_button.setText("🔑")  # Key emoji - represents API key settings
+        self.settings_button.setToolTip("Settings - Change API Key")
+        self.settings_button.clicked.connect(self._show_settings)
+        self._apply_settings_button_style()
+        button_layout.addWidget(self.settings_button)
+
+        button_layout.addSpacing(8)
+
         # Theme toggle button
         self.theme_toggle = QPushButton()
         self.theme_toggle.setFixedSize(36, 36)
@@ -887,6 +1293,50 @@ class NLCalendarCreator(QMainWindow):
         """Apply current theme style to clear button."""
         self.clear_button.setStyleSheet(self._get_clear_button_style())
 
+    def _get_settings_button_style(self) -> str:
+        """Generate settings button style."""
+        return f"""
+            QPushButton {{
+                background-color: {get_color('background_tertiary')};
+                border: 1px solid {get_color('border_medium')};
+                border-radius: 18px;
+                font-size: 18px;
+            }}
+            QPushButton:hover {{
+                background-color: {get_color('background_secondary')};
+                border-color: {get_color('accent')};
+            }}
+            QPushButton:pressed {{
+                background-color: {get_color('border_light')};
+            }}
+        """
+
+    def _apply_settings_button_style(self):
+        """Apply current theme style to settings button."""
+        self.settings_button.setStyleSheet(self._get_settings_button_style())
+
+    def _show_settings(self):
+        """Show settings dialog to change API key."""
+        dialog = APIKeySetupDialog(self)
+        dialog.setWindowTitle("Settings - API Key")
+
+        # Pre-fill with current key (masked)
+        current_key = load_api_key()
+        if current_key:
+            # Show first 8 chars + masked rest for security
+            masked = current_key[:8] + "*" * (len(current_key) - 8)
+            dialog.api_key_input.setPlaceholderText(f"Current: {masked}")
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Reset the API client so it picks up the new key
+            with self._api_client_lock:
+                self.api_client = None
+            QMessageBox.information(
+                self,
+                "API Key Updated",
+                "Your API key has been saved. It will be used for the next request."
+            )
+
     def _get_theme_toggle_style(self) -> str:
         """Generate theme toggle button style."""
         return f"""
@@ -927,6 +1377,7 @@ class NLCalendarCreator(QMainWindow):
         self._apply_preview_container_style()
 
         # Update buttons
+        self._apply_settings_button_style()
         self._apply_theme_toggle_style()
         self._apply_clear_button_style()
         self._apply_create_button_style()
@@ -1141,14 +1592,20 @@ class NLCalendarCreator(QMainWindow):
         # Thread-safe API client initialization on first use
         with self._api_client_lock:
             if not self.api_client:
-                api_key = os.environ.get('GEMINI_API_KEY')
+                api_key = load_api_key()
                 if not api_key:
-                    QMessageBox.critical(
-                        self,
-                        "API Key Error",
-                        "GEMINI_API_KEY environment variable not set. Please set it before continuing."
-                    )
-                    return
+                    # Show setup dialog
+                    dialog = APIKeySetupDialog(self)
+                    if dialog.exec() != QDialog.DialogCode.Accepted:
+                        return  # User cancelled
+                    api_key = load_api_key()  # Reload after setup
+                    if not api_key:
+                        QMessageBox.critical(
+                            self,
+                            "API Key Error",
+                            "Failed to load API key. Please try again."
+                        )
+                        return
                 try:
                     self.api_client = CalendarAPIClient(api_key=api_key)
                 except Exception as e:
@@ -1709,6 +2166,15 @@ if __name__ == '__main__':
         fallback_path = get_resource_path("calendar-svg-simple.png")
         if Path(fallback_path).exists():
             app.setWindowIcon(QIcon(fallback_path))
+
+    # Load API key from .env on startup
+    api_key = load_api_key()
+
+    # If no API key, show setup dialog before main window
+    if not api_key:
+        setup_dialog = APIKeySetupDialog()
+        if setup_dialog.exec() != QDialog.DialogCode.Accepted:
+            sys.exit(0)  # User chose to quit
 
     window = NLCalendarCreator()
     window.show()
