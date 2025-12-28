@@ -33,7 +33,8 @@ from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_st
 from eventcalendar.storage.key_manager import load_api_key, check_and_warn_legacy_storage
 from eventcalendar.ui.theme.colors import get_color
 from eventcalendar.ui.theme.scales import (
-    TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS, SHADOW_SCALE, FONT_SANS
+    TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS, SHADOW_SCALE,
+    FONT_SANS, get_font, set_app_font
 )
 from eventcalendar.ui.theme.manager import ThemeManager, toggle_theme
 from eventcalendar.ui.styles.base import px
@@ -64,6 +65,9 @@ class NLCalendarCreator(QMainWindow):
     def __init__(self):
         """Initialize the main window."""
         super().__init__()
+
+        # Set app-wide Geist font (Qt stylesheets don't work for font-family on macOS)
+        set_app_font(QApplication.instance(), "sans", 14)
 
         self._init_window_properties()
         self._init_thread_infrastructure()
