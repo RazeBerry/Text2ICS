@@ -10,23 +10,56 @@ Spacing follows a harmonious scale with generous whitespace.
 # FONT FAMILIES - Single source of truth for all fonts
 # =============================================================================
 # Modify these constants to change fonts globally across the application.
+# NOTE: Qt stylesheets don't properly handle font-family on macOS.
+# Use get_font() to create QFont objects instead.
 
 FONT_FAMILIES = {
-    # Geist - Vercel's modern, technical sans-serif
-    # Using Qt-compatible font names (not CSS -apple-system)
-    "sans": "Geist, '.AppleSystemUIFont', 'Helvetica Neue', sans-serif",
-
-    # Geist for consistency
-    "serif": "Geist, '.AppleSystemUIFont', 'Helvetica Neue', sans-serif",
-
-    # Geist Mono for code and API keys
-    "mono": "Geist Mono, SF Mono, Monaco, Menlo, monospace",
+    # Primary font name (Qt will use this directly)
+    "sans": "Geist",
+    "serif": "Geist",
+    "mono": "Geist Mono",
 }
 
 # Convenience aliases for direct import
 FONT_SANS = FONT_FAMILIES["sans"]
 FONT_SERIF = FONT_FAMILIES["serif"]
 FONT_MONO = FONT_FAMILIES["mono"]
+
+
+def get_font(family: str = "sans", size: int = 14, weight: int = 400) -> "QFont":
+    """Create a QFont object with the specified family and properties.
+
+    Qt stylesheets don't properly handle font-family on macOS, so use this
+    function to create QFont objects and apply them with widget.setFont().
+
+    Args:
+        family: Font family key ("sans", "serif", or "mono")
+        size: Font size in points
+        weight: Font weight (400=normal, 500=medium, 600=semibold, 700=bold)
+
+    Returns:
+        QFont object configured with the specified properties.
+    """
+    from PyQt6.QtGui import QFont
+
+    font_name = FONT_FAMILIES.get(family, FONT_FAMILIES["sans"])
+    font = QFont(font_name, size)
+    font.setWeight(QFont.Weight(weight))
+    return font
+
+
+def set_app_font(app: "QApplication", family: str = "sans", size: int = 14) -> None:
+    """Set the application-wide default font.
+
+    Call this once at app startup to set Geist as the default font.
+
+    Args:
+        app: The QApplication instance
+        family: Font family key ("sans", "serif", or "mono")
+        size: Default font size in points
+    """
+    font = get_font(family, size)
+    app.setFont(font)
 
 
 # =============================================================================
