@@ -2,9 +2,8 @@
 
 import logging
 import os
+import sys
 from typing import Optional, Tuple
-
-from dotenv import set_key
 
 from eventcalendar.config.constants import PREFERRED_ENV_VAR, PRIMARY_ENV_VAR
 from eventcalendar.storage.keyring_storage import load_from_keyring, save_to_keyring
@@ -14,10 +13,24 @@ from eventcalendar.storage.env_storage import (
     get_executable_dir_env_path,
     load_from_env_file,
     store_in_env_file,
-    harden_file_permissions,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_keyring_display_name() -> str:
+    """Get platform-appropriate display name for the secure keyring storage.
+
+    Returns:
+        Human-readable name for the OS keyring/credential manager.
+    """
+    if sys.platform == "darwin":
+        return "macOS Keychain"
+    elif sys.platform.startswith("win"):
+        return "Windows Credential Manager"
+    else:
+        # Linux and other Unix-like systems use Secret Service
+        return "System Keyring (Secret Service)"
 
 
 def get_api_key_source() -> Tuple[Optional[str], str]:
@@ -35,7 +48,7 @@ def get_api_key_source() -> Tuple[Optional[str], str]:
     # Check keyring
     keyring_key = load_from_keyring()
     if keyring_key:
-        return keyring_key, "macOS Keychain (Secure)"
+        return keyring_key, f"{get_keyring_display_name()} (Secure)"
 
     # Check user config .env
     env_file_key = load_from_env_file(get_env_file_path())
@@ -140,9 +153,7 @@ def save_api_key(api_key: str) -> bool:
     """Save the API key securely.
 
     Primary: OS keyring (encrypted, persistent)
-    Fallback: .env in per-user config dir with secure permissions
-
-    Note: Also sets os.environ for current process to avoid reload overhead.
+    Fallback: .env in per-user config dir with secure permissions (only if keyring fails)
 
     Args:
         api_key: The API key to save.
@@ -160,22 +171,8 @@ def save_api_key(api_key: str) -> bool:
             logger.info("API key saved to keyring successfully")
         else:
             logger.warning("Keyring unavailable, using file storage instead")
+            store_in_env_file(api_key)
 
-        # Always persist a copy to per-user config file
-        store_in_env_file(api_key)
-
-        # Set in current process environment for immediate use
-        os.environ[PREFERRED_ENV_VAR] = api_key
-        os.environ[PRIMARY_ENV_VAR] = api_key
-
-        return True
-
-    except FileExistsError:
-        # File was created between check and open - just update permissions and retry
-        logger.debug("File created concurrently, retrying...")
-        harden_file_permissions(get_env_file_path())
-        set_key(str(get_env_file_path()), PRIMARY_ENV_VAR, api_key)
-        os.environ[PRIMARY_ENV_VAR] = api_key
         return True
 
     except Exception as e:

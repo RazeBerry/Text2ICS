@@ -62,7 +62,7 @@ pip install PyQt6 google-generativeai
 2. Copy the key and paste it into the app
 3. Click "Save & Continue"
 
-Your key will be stored in **macOS Keychain** (encrypted) and persist across sessions.
+Your key will be stored in your **OS secure credential storage** (macOS Keychain, Windows Credential Manager, or Linux Secret Service) when available and persist across sessions.
 
 ### Option 1: Environment Variable (Advanced - Overrides everything)
 
@@ -111,7 +111,7 @@ python Calender.py
 ### 🔐 Security Notes
 
 - **Never commit `.env` files** with real API keys to version control
-- The app stores keys in **macOS Keychain** (encrypted by the OS)
+- The app stores keys in your **OS secure storage** (macOS Keychain / Windows Credential Manager / Linux Secret Service)
 - Legacy `.env` files in the project directory are **automatically migrated** to secure storage
 - You'll be warned if your key is stored insecurely and offered automatic migration
 

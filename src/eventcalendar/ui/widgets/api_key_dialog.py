@@ -114,8 +114,9 @@ class APIKeySetupDialog(QDialog):
 
         # Security note with subtle styling
         self.security_note = QLabel(
-            "Your API key is stored securely in your system keychain "
-            "and never shared with anyone."
+            "Your API key is stored securely on your device "
+            "(system keychain when available) and used only to authenticate "
+            "requests to Google Gemini."
         )
         self.security_note.setWordWrap(True)
         layout.addWidget(self.security_note)

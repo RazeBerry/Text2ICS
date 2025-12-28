@@ -15,7 +15,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import Qt, pyqtSignal, QByteArray
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QImage, QPixmap
@@ -37,8 +37,8 @@ class ImageAttachmentPayload:
     temp_path: Optional[str] = None
     base64_data: Optional[str] = None
 
-    def materialize(self) -> tuple:
-        """Get the file path, MIME type, and base64 data.
+    def materialize(self, include_base64: bool = True) -> Tuple[str, str, Optional[str]]:
+        """Get the file path, MIME type, and optionally base64 data.
 
         Returns:
             Tuple of (path, mime_type, base64_data).
@@ -46,10 +46,10 @@ class ImageAttachmentPayload:
         path = self.temp_path or self.source_path
         if not path:
             raise ValueError("Image attachment is missing a file path")
-        if self.base64_data is None:
+        if include_base64 and self.base64_data is None:
             with open(path, "rb") as fh:
                 self.base64_data = base64.b64encode(fh.read()).decode("utf-8")
-        return path, self.mime_type, self.base64_data
+        return path, self.mime_type, (self.base64_data if include_base64 else None)
 
 
 class ImageAttachmentArea(QFrame):

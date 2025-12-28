@@ -53,7 +53,7 @@ src/eventcalendar/               # Main package (v2.0.0)
 │   └── timezone_utils.py        # resolve_timezone(), normalize_tz()
 ├── storage/
 │   ├── key_manager.py           # get_api_key(), save_api_key()
-│   ├── keyring_storage.py       # macOS Keychain integration
+│   ├── keyring_storage.py       # OS secure storage (Keychain/Credential Manager/Secret Service)
 │   └── env_storage.py           # .env file handling
 ├── ui/
 │   ├── main_window.py           # NLCalendarCreator(QMainWindow)
@@ -100,14 +100,15 @@ from Calender import NLCalendarCreator
 - `eventcalendar.config.constants` - All string constants, error patterns, ABBR_TO_TZ timezone map
 
 ### Core
-- `CalendarAPIClient.extract_events(text, images)` - Main API call to Gemini
+- `CalendarAPIClient.get_event_data(text, images, status_callback)` - Main Gemini extraction call (returns event dicts)
+- `CalendarAPIClient.create_calendar_event(text, images, status_callback)` - Back-compat helper (returns merged ICS string)
 - `CalendarEvent.from_dict(data)` / `.to_dict()` - Event serialization with validation
 - `build_ics_from_events(events)` - Convert events to ICS format
 - `is_retryable_error(error)` - Determine if error is transient
 
 ### Storage
-- `get_api_key()` - Retrieve API key from priority chain
-- `save_api_key(key, method)` - Store securely in keychain or config
+- `load_api_key()` - Retrieve API key from priority chain
+- `save_api_key(key)` - Store securely in keychain or config
 
 ### UI
 - `NLCalendarCreator` - Main application window
@@ -184,8 +185,14 @@ Defined in `eventcalendar.core.retry`:
 
 1. `GEMINI_API_KEY_FREE` environment variable (preferred for free tier)
 2. `GEMINI_API_KEY` environment variable
-3. macOS Keychain via `keyring` library
-4. User config directory: `~/Library/Application Support/EventCalendarGenerator/.env`
+3. OS secure storage via `keyring` library:
+   - macOS: Keychain
+   - Windows: Credential Manager
+   - Linux: Secret Service (requires libsecret)
+4. User config directory `.env`:
+   - macOS: `~/Library/Application Support/EventCalendarGenerator/.env`
+   - Windows: `%APPDATA%\EventCalendarGenerator\.env`
+   - Linux: `~/.config/EventCalendarGenerator/.env` (or `$XDG_CONFIG_HOME`)
 5. Legacy: `.env` in project directory (auto-migrates to secure storage)
 
 ## Key Implementation Details
