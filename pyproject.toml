@@ -26,6 +26,7 @@ classifiers = [
 dependencies = [
     "PyQt6>=6.0.0",
     "google-generativeai>=0.3.0",
+    "Pillow>=10.0.0",
     "icalendar>=5.0.0",
     "pytz>=2023.3",
     "python-dateutil>=2.8.0",

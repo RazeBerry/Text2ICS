@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from string import Formatter
 from typing import Callable, Dict, List, Optional, Tuple
@@ -18,6 +19,7 @@ from eventcalendar.config.constants import (
 from eventcalendar.exceptions.errors import CalendarAPIError, RetryExhaustedError
 from eventcalendar.core.retry import is_retryable_error, wrap_api_key_error, is_api_key_error
 from eventcalendar.core.ics_builder import build_ics_from_events
+from eventcalendar.core.image_preprocessing import preprocess_image_for_upload
 from eventcalendar.utils.masking import mask_key
 
 logger = logging.getLogger(__name__)
@@ -171,7 +173,7 @@ Current timezone: {user_timezone}
 
         Args:
             event_description: Natural language description of the event(s).
-            image_data: List of (file_path, mime_type, base64_data) tuples.
+            image_data: List of (file_path, mime_type, base64_data) tuples (base64 unused).
             status_callback: Callback function for status updates.
 
         Returns:
@@ -183,6 +185,13 @@ Current timezone: {user_timezone}
         """
         prompt = self._build_prompt(event_description)
 
+        if image_data:
+            try:
+                status_callback(f"Preparing {len(image_data)} image(s)...")
+            except Exception:
+                pass
+        history = self._prepare_image_history(image_data)
+
         for attempt in range(self.max_retries):
             try:
                 status_callback(
@@ -193,7 +202,6 @@ Current timezone: {user_timezone}
                 )
                 logger.debug("Attempt %d/%d", attempt + 1, self.max_retries)
 
-                history = self._prepare_image_history(image_data)
                 response_text = self._call_api(prompt, history)
                 events = self._parse_response(response_text)
 
@@ -247,16 +255,78 @@ Current timezone: {user_timezone}
         if not image_data:
             return []
 
-        image_parts = []
-        for file_path, mime_type, _ in image_data:
-            if os.path.exists(file_path):
+        candidates: List[Tuple[int, str, str]] = []
+        for index, (file_path, mime_type, _) in enumerate(image_data):
+            if not file_path:
+                continue
+            if not os.path.exists(file_path):
+                logger.warning("Image path does not exist: %s", file_path)
+                continue
+            candidates.append((index, file_path, mime_type))
+
+        if not candidates:
+            return []
+
+        raw_workers = os.environ.get("EVENTCALENDAR_UPLOAD_WORKERS", "3")
+        try:
+            configured_workers = int(raw_workers)
+        except ValueError:
+            configured_workers = 3
+
+        max_workers = max(1, min(configured_workers, len(candidates), 8))
+
+        def preprocess_and_upload(index: int, file_path: str, mime_type: str):
+            processed = preprocess_image_for_upload(file_path, mime_type)
+            try:
+                uploaded = self.upload_to_gemini(processed.path, mime_type=processed.mime_type)
+                return index, uploaded
+            finally:
+                processed.cleanup()
+
+        results: List[Tuple[int, object]] = []
+
+        if max_workers == 1 or len(candidates) == 1:
+            for index, file_path, mime_type in candidates:
                 try:
-                    uploaded = self.upload_to_gemini(file_path, mime_type=mime_type)
-                    image_parts.append(uploaded)
+                    results.append(preprocess_and_upload(index, file_path, mime_type))
                 except CalendarAPIError:
                     raise
                 except Exception as e:
                     logger.warning("Failed to upload image %s: %s", file_path, e)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(preprocess_and_upload, index, file_path, mime_type): (index, file_path, mime_type)
+                    for index, file_path, mime_type in candidates
+                }
+                failed: List[Tuple[int, str, str]] = []
+                try:
+                    for future in as_completed(futures):
+                        index, file_path, mime_type = futures[future]
+                        try:
+                            results.append(future.result())
+                        except CalendarAPIError:
+                            for pending in futures:
+                                pending.cancel()
+                            raise
+                        except Exception as e:
+                            logger.warning("Failed to upload image %s: %s", file_path, e)
+                            failed.append((index, file_path, mime_type))
+                finally:
+                    # Ensure all futures complete/cancel before returning.
+                    for pending in futures:
+                        pending.cancel()
+
+            # Safety net: if some parallel uploads failed, retry those sequentially.
+            for index, file_path, mime_type in failed:
+                try:
+                    results.append(preprocess_and_upload(index, file_path, mime_type))
+                except CalendarAPIError:
+                    raise
+                except Exception as e:
+                    logger.warning("Retry upload failed for image %s: %s", file_path, e)
+
+        image_parts = [uploaded for _, uploaded in sorted(results, key=lambda item: item[0])]
 
         if image_parts:
             return [{"role": "user", "parts": image_parts}]
