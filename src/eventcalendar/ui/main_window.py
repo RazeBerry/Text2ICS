@@ -457,34 +457,42 @@ class NLCalendarCreator(QMainWindow):
         card_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.setSpacing(SPACING_SCALE["sm"])
 
-        # Three-dot wave animation container
+        # Three-dot wave animation container (transparent background)
         dots_container = QWidget()
+        dots_container.setStyleSheet("background: transparent;")
         dots_layout = QHBoxLayout(dots_container)
         dots_layout.setContentsMargins(0, 0, 0, 0)
         dots_layout.setSpacing(SPACING_SCALE["sm"])
         dots_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # Create three wave dots
+        # Create three wave dots with opacity effects for breathing
         accent_color = get_color('accent')
         self._wave_dots = []
+        self._dot_opacities = []
         for _ in range(3):
             dot = WaveDot(accent_color, size=10)
+            # Add opacity effect for breathing
+            opacity_effect = QGraphicsOpacityEffect()
+            opacity_effect.setOpacity(1.0)
+            dot.setGraphicsEffect(opacity_effect)
             self._wave_dots.append(dot)
+            self._dot_opacities.append(opacity_effect)
             dots_layout.addWidget(dot)
 
         card_layout.addWidget(dots_container)
 
-        # Set up wave animation - each dot bobs with phase offset
+        # Set up combined wave + breathing animation
         self._wave_animation = QParallelAnimationGroup()
         wave_height = 8.0  # Pixels to move up/down
         wave_duration = 600  # ms for one up-down cycle
+        breath_duration = 1200  # ms for one breath cycle (slower than wave)
 
-        for i, dot in enumerate(self._wave_dots):
-            # Each dot gets a sequential up-down animation
-            dot_seq = QSequentialAnimationGroup()
-
+        for i, (dot, opacity) in enumerate(zip(self._wave_dots, self._dot_opacities)):
             # Phase delay: stagger each dot by 1/3 of the cycle
             phase_delay = i * (wave_duration // 3)
+
+            # === WAVE ANIMATION (position) ===
+            wave_seq = QSequentialAnimationGroup()
 
             # Move up
             up_anim = QPropertyAnimation(dot, b"offset")
@@ -500,22 +508,58 @@ class NLCalendarCreator(QMainWindow):
             down_anim.setEndValue(0.0)
             down_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
 
-            dot_seq.addAnimation(up_anim)
-            dot_seq.addAnimation(down_anim)
-            dot_seq.setLoopCount(-1)
+            wave_seq.addAnimation(up_anim)
+            wave_seq.addAnimation(down_anim)
+            wave_seq.setLoopCount(-1)
 
-            # Create wrapper to handle phase offset
-            phase_wrapper = QSequentialAnimationGroup()
+            # === BREATHING ANIMATION (opacity) ===
+            breath_seq = QSequentialAnimationGroup()
+
+            # Fade out
+            fade_out = QPropertyAnimation(opacity, b"opacity")
+            fade_out.setDuration(breath_duration // 2)
+            fade_out.setStartValue(1.0)
+            fade_out.setEndValue(0.4)
+            fade_out.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+            # Fade in
+            fade_in = QPropertyAnimation(opacity, b"opacity")
+            fade_in.setDuration(breath_duration // 2)
+            fade_in.setStartValue(0.4)
+            fade_in.setEndValue(1.0)
+            fade_in.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+            breath_seq.addAnimation(fade_out)
+            breath_seq.addAnimation(fade_in)
+            breath_seq.setLoopCount(-1)
+
+            # Combine wave + breathing for this dot (both run in parallel)
+            dot_animations = QParallelAnimationGroup()
+
+            # Wave with phase offset
+            wave_wrapper = QSequentialAnimationGroup()
             if phase_delay > 0:
-                # Add a pause for phase offset using a dummy animation
                 pause = QPropertyAnimation(dot, b"offset")
                 pause.setDuration(phase_delay)
                 pause.setStartValue(0.0)
                 pause.setEndValue(0.0)
-                phase_wrapper.addAnimation(pause)
-            phase_wrapper.addAnimation(dot_seq)
+                wave_wrapper.addAnimation(pause)
+            wave_wrapper.addAnimation(wave_seq)
 
-            self._wave_animation.addAnimation(phase_wrapper)
+            # Breathing with same phase offset (synchronized with wave)
+            breath_wrapper = QSequentialAnimationGroup()
+            if phase_delay > 0:
+                breath_pause = QPropertyAnimation(opacity, b"opacity")
+                breath_pause.setDuration(phase_delay)
+                breath_pause.setStartValue(1.0)
+                breath_pause.setEndValue(1.0)
+                breath_wrapper.addAnimation(breath_pause)
+            breath_wrapper.addAnimation(breath_seq)
+
+            dot_animations.addAnimation(wave_wrapper)
+            dot_animations.addAnimation(breath_wrapper)
+
+            self._wave_animation.addAnimation(dot_animations)
 
         self.processing_label = QLabel("Processing...")
         headline_style = TYPOGRAPHY_SCALE["headline"]
@@ -759,9 +803,10 @@ class NLCalendarCreator(QMainWindow):
             self.overlay.setGeometry(self.centralWidget().rect())
             self.overlay.show()
             self.overlay.raise_()
-            # Reset dots to starting position and start wave
-            for dot in self._wave_dots:
+            # Reset dots to starting position and opacity
+            for dot, opacity in zip(self._wave_dots, self._dot_opacities):
                 dot.offset = 0.0
+                opacity.setOpacity(1.0)
             self._wave_animation.start()
         else:
             self._wave_animation.stop()
