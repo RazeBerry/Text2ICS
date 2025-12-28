@@ -598,10 +598,10 @@ class NLCalendarCreator(QMainWindow):
         self.finalize_events_signal.connect(self._finalize_events)
 
     def _check_legacy_storage(self) -> None:
-        """Check for legacy API key storage and warn user."""
+        """Check for legacy API key storage and log silently."""
         warning = check_and_warn_legacy_storage()
         if warning:
-            QMessageBox.warning(self, "Security Notice", warning)
+            logger.info("Legacy storage notice: %s", warning)
 
     # --- Event Handlers ---
 
