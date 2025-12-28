@@ -13,13 +13,14 @@ Spacing follows a harmonious scale with generous whitespace.
 
 FONT_FAMILIES = {
     # Geist - Vercel's modern, technical sans-serif
-    "sans": "'Geist', -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+    # Using Qt-compatible font names (not CSS -apple-system)
+    "sans": "Geist, '.AppleSystemUIFont', 'Helvetica Neue', sans-serif",
 
     # Geist for consistency
-    "serif": "'Geist', -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+    "serif": "Geist, '.AppleSystemUIFont', 'Helvetica Neue', sans-serif",
 
     # Geist Mono for code and API keys
-    "mono": "'Geist Mono', 'SF Mono', 'Monaco', 'Menlo', monospace",
+    "mono": "Geist Mono, SF Mono, Monaco, Menlo, monospace",
 }
 
 # Convenience aliases for direct import
