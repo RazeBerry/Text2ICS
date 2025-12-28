@@ -14,10 +14,10 @@ Spacing follows a harmonious scale with generous whitespace.
 # Use get_font() to create QFont objects instead.
 
 FONT_FAMILIES = {
-    # Primary font name (Qt will use this directly)
-    "sans": "JetBrains Mono",
-    "serif": "JetBrains Mono",
-    "mono": "JetBrains Mono",
+    # Apple system fonts (Qt uses .AppleSystemUIFont for system font)
+    "sans": ".AppleSystemUIFont",
+    "serif": ".AppleSystemUIFont",
+    "mono": "SF Mono",
 }
 
 # Convenience aliases for direct import
