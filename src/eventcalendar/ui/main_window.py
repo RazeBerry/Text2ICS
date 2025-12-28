@@ -386,7 +386,7 @@ class NLCalendarCreator(QMainWindow):
         button_layout.setSpacing(SPACING_SCALE["sm"])
         button_layout.setContentsMargins(0, SPACING_SCALE["sm"], 0, 0)
 
-        # Left side: secondary actions (subtle Anthropic-style buttons)
+        # Left side: utility actions (tertiary/ghost style)
         self.settings_button = QPushButton("Settings")
         self.settings_button.setMinimumHeight(36)
         self.settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -394,7 +394,7 @@ class NLCalendarCreator(QMainWindow):
         self.style_manager.register(
             "settings_button",
             self.settings_button,
-            ButtonStyles.subtle
+            ButtonStyles.tertiary
         )
         button_layout.addWidget(self.settings_button)
 
@@ -405,7 +405,7 @@ class NLCalendarCreator(QMainWindow):
         self.style_manager.register(
             "theme_button",
             self.theme_button,
-            ButtonStyles.subtle
+            ButtonStyles.tertiary
         )
         button_layout.addWidget(self.theme_button)
 

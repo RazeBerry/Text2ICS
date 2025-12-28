@@ -1,29 +1,28 @@
 """Button style generators for the UI.
 
-Anthropic-Inspired Design System
-================================
-Buttons feature refined typography, warm shadows, and subtle hover states.
-Primary actions use terracotta, secondary actions are understated.
+Warm Editorial Design System
+============================
+A cohesive button hierarchy using the terracotta + cream palette.
+Primary actions use filled terracotta, secondary uses warm outlines,
+tertiary actions are ghost-style with hover reveal.
 """
 
 from eventcalendar.ui.theme.colors import get_color
-from eventcalendar.ui.theme.scales import (
-    TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS
-)
+from eventcalendar.ui.theme.scales import BORDER_RADIUS
 from eventcalendar.ui.styles.base import px
 
 
 class ButtonStyles:
     """Collection of button style generators."""
 
+    # Consistent typography across all buttons
+    _FONT_STACK = '"SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif'
+
     @staticmethod
     def accent() -> str:
-        """Generate accent (primary) button style.
+        """Primary CTA button - terracotta fill.
 
-        Warm terracotta with subtle shadow and refined hover state.
-
-        Returns:
-            Stylesheet string for accent buttons.
+        Use for: Main actions like "Create Event", "Save", "Submit"
         """
         return f"""
             QPushButton {{
@@ -31,11 +30,10 @@ class ButtonStyles:
                 color: #FFFFFF;
                 border: none;
                 border-radius: {px(BORDER_RADIUS["md"])};
-                font-family: {TYPOGRAPHY_SCALE["body"]["font_family"]};
-                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                font-family: {ButtonStyles._FONT_STACK};
+                font-size: 15px;
                 font-weight: 600;
-                letter-spacing: 0.01em;
-                padding: {px(SPACING_SCALE["xs"] + 4)} {px(SPACING_SCALE["md"])};
+                padding: 12px 24px;
             }}
             QPushButton:hover {{
                 background-color: {get_color('accent_hover')};
@@ -44,30 +42,27 @@ class ButtonStyles:
                 background-color: {get_color('accent_pressed')};
             }}
             QPushButton:disabled {{
-                background-color: {get_color('accent_disabled')};
-                color: {get_color('text_tertiary')};
+                background-color: {get_color('accent_muted')};
+                color: rgba(255, 255, 255, 0.6);
             }}
         """
 
     @staticmethod
     def secondary() -> str:
-        """Generate secondary button style.
+        """Secondary button - warm outlined style.
 
-        Subtle, understated with warm border.
-
-        Returns:
-            Stylesheet string for secondary buttons.
+        Use for: Secondary actions like "Clear", "Cancel", "Back"
         """
         return f"""
             QPushButton {{
                 background-color: transparent;
                 color: {get_color('text_primary')};
-                border: 1px solid {get_color('border_medium')};
+                border: 1.5px solid {get_color('border_medium')};
                 border-radius: {px(BORDER_RADIUS["md"])};
-                font-family: {TYPOGRAPHY_SCALE["body"]["font_family"]};
-                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
+                font-family: {ButtonStyles._FONT_STACK};
+                font-size: 15px;
                 font-weight: 500;
-                padding: {px(SPACING_SCALE["xs"] + 4)} {px(SPACING_SCALE["md"])};
+                padding: 12px 24px;
             }}
             QPushButton:hover {{
                 background-color: {get_color('background_secondary')};
@@ -77,71 +72,41 @@ class ButtonStyles:
                 background-color: {get_color('background_tertiary')};
             }}
             QPushButton:disabled {{
-                color: {get_color('text_tertiary')};
+                color: {get_color('text_placeholder')};
                 border-color: {get_color('border_light')};
             }}
         """
 
     @staticmethod
-    def ghost() -> str:
-        """Generate ghost button style.
+    def tertiary() -> str:
+        """Tertiary button - ghost style with hover reveal.
 
-        Minimal, text-only with subtle hover background.
-
-        Returns:
-            Stylesheet string for ghost buttons.
+        Use for: Utility actions like "Settings", "Dark Mode", navigation
         """
         return f"""
             QPushButton {{
                 background-color: transparent;
-                color: {get_color('text_secondary')};
+                color: {get_color('text_tertiary')};
                 border: none;
-                border-radius: {px(BORDER_RADIUS["sm"])};
-                font-family: {TYPOGRAPHY_SCALE["body"]["font_family"]};
-                font-size: {px(TYPOGRAPHY_SCALE["body"]["size_px"])};
-                font-weight: 500;
-                padding: {px(SPACING_SCALE["xs"])} {px(SPACING_SCALE["sm"])};
-            }}
-            QPushButton:hover {{
-                background-color: {get_color('background_tertiary')};
-                color: {get_color('text_primary')};
-            }}
-            QPushButton:pressed {{
-                background-color: {get_color('border_light')};
-            }}
-        """
-
-    @staticmethod
-    def subtle() -> str:
-        """Generate subtle button style for secondary actions.
-
-        Anthropic-inspired: visible but understated with warm undertones.
-        Features a light background, subtle border, and refined hover state.
-
-        Returns:
-            Stylesheet string for subtle buttons.
-        """
-        return f"""
-            QPushButton {{
-                background-color: {get_color('background_secondary')};
-                color: {get_color('text_secondary')};
-                border: 1px solid {get_color('border_light')};
                 border-radius: {px(BORDER_RADIUS["md"])};
-                font-family: {TYPOGRAPHY_SCALE["body"]["font_family"]};
-                font-size: {px(TYPOGRAPHY_SCALE["footnote"]["size_px"])};
+                font-family: {ButtonStyles._FONT_STACK};
+                font-size: 14px;
                 font-weight: 500;
-                padding: {px(SPACING_SCALE["xs"])} {px(SPACING_SCALE["md"])};
+                padding: 10px 16px;
             }}
             QPushButton:hover {{
                 background-color: {get_color('background_tertiary')};
-                border-color: {get_color('border_medium')};
                 color: {get_color('text_primary')};
             }}
             QPushButton:pressed {{
                 background-color: {get_color('border_light')};
-                border-color: {get_color('border_medium')};
+                color: {get_color('text_primary')};
             }}
         """
+
+    # Aliases for semantic clarity
+    ghost = tertiary
+    subtle = tertiary
 
     @staticmethod
     def icon() -> str:
