@@ -1,7 +1,6 @@
 """Retry logic and error classification for API calls."""
 
 import logging
-from typing import Optional
 
 from eventcalendar.config.constants import (
     NON_RETRYABLE_ERROR_PATTERNS,

@@ -8,7 +8,7 @@ Primary actions use terracotta, secondary actions are understated.
 
 from eventcalendar.ui.theme.colors import get_color
 from eventcalendar.ui.theme.scales import (
-    TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS, SHADOW_SCALE
+    TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS
 )
 from eventcalendar.ui.styles.base import px
 

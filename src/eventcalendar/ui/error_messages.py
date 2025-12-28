@@ -1,7 +1,5 @@
 """User-friendly error message handling."""
 
-from typing import Optional
-
 from eventcalendar.exceptions.errors import (
     CalendarAPIError,
     RetryExhaustedError,
