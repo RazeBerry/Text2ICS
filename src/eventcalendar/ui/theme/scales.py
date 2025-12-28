@@ -15,9 +15,9 @@ Spacing follows a harmonious scale with generous whitespace.
 
 FONT_FAMILIES = {
     # Primary font name (Qt will use this directly)
-    "sans": "Geist",
-    "serif": "Geist",
-    "mono": "Geist Mono",
+    "sans": "JetBrains Mono",
+    "serif": "JetBrains Mono",
+    "mono": "JetBrains Mono",
 }
 
 # Convenience aliases for direct import
