@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from dotenv import load_dotenv, set_key
+from dotenv import dotenv_values, set_key
 
 from eventcalendar.config.constants import PREFERRED_ENV_VAR, PRIMARY_ENV_VAR
 
@@ -20,16 +20,16 @@ def get_user_config_dir() -> Path:
         Path to the user's config directory for this application.
     """
     if sys.platform.startswith("win"):
-        base = Path(os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA", ""))
-        if not base:
-            base = Path.home() / "AppData" / "Roaming"
+        base_str = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        base = Path(base_str) if base_str else (Path.home() / "AppData" / "Roaming")
         return base / "EventCalendarGenerator"
 
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "EventCalendarGenerator"
 
     # Linux and other Unix-like systems
-    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    base_str = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(base_str) if base_str else (Path.home() / ".config")
     return base / "EventCalendarGenerator"
 
 
@@ -48,7 +48,8 @@ def get_legacy_env_path() -> Path:
     Returns:
         Path to the legacy .env file location.
     """
-    return Path(__file__).parent.parent.parent.parent.parent / ".env"
+    # src/eventcalendar/storage/env_storage.py -> project root/.env (when running from source checkout)
+    return Path(__file__).parent.parent.parent.parent / ".env"
 
 
 def get_executable_dir_env_path() -> Path:
@@ -82,6 +83,20 @@ def harden_file_permissions(path: Path) -> None:
         logger.warning("Could not tighten permissions on %s: %s", path, e)
 
 
+def harden_directory_permissions(path: Path) -> None:
+    """Best-effort: restrict directory permissions to the current user on POSIX.
+
+    Args:
+        path: Path to the directory to secure.
+    """
+    if os.name != "posix":
+        return
+    try:
+        path.chmod(0o700)
+    except Exception as e:
+        logger.warning("Could not tighten permissions on %s: %s", path, e)
+
+
 def load_from_env_file(path: Path) -> Optional[str]:
     """Load the API key from an environment file.
 
@@ -93,9 +108,13 @@ def load_from_env_file(path: Path) -> Optional[str]:
     """
     if not path.exists():
         return None
-    load_dotenv(path)
-    # Prefer the free-tier variable if both are present
-    return os.environ.get(PREFERRED_ENV_VAR) or os.environ.get(PRIMARY_ENV_VAR)
+
+    # Parse without mutating os.environ (avoids leaking secrets to child processes).
+    values = dotenv_values(path)
+    key = values.get(PREFERRED_ENV_VAR) or values.get(PRIMARY_ENV_VAR)
+    if not key:
+        return None
+    return str(key).strip().strip("'\"").strip()
 
 
 def store_in_env_file(api_key: str) -> None:
@@ -108,20 +127,29 @@ def store_in_env_file(api_key: str) -> None:
 
     # Create parent directory with secure permissions
     env_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    harden_directory_permissions(env_path.parent)
 
     # Create file with secure permissions atomically
     if not env_path.exists():
-        fd = os.open(str(env_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
-        os.close(fd)
-    else:
+        try:
+            fd = os.open(str(env_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            pass
+
+    if env_path.exists():
         harden_file_permissions(env_path)
 
     # Write both variable names for clarity; free-tier key is preferred
     set_key(str(env_path), PREFERRED_ENV_VAR, api_key)
     set_key(str(env_path), PRIMARY_ENV_VAR, api_key)
 
+    if env_path.exists():
+        harden_file_permissions(env_path)
+
 
 # Backward compatibility aliases
 _harden_file_permissions = harden_file_permissions
+_harden_directory_permissions = harden_directory_permissions
 _load_from_env_file = load_from_env_file
 _store_in_env_file = store_in_env_file

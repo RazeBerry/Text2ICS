@@ -43,7 +43,7 @@ from eventcalendar.ui.theme.manager import ThemeManager, toggle_theme
 from eventcalendar.ui.styles.base import px
 from eventcalendar.ui.styles.manager import StyleManager
 from eventcalendar.ui.styles.button_styles import ButtonStyles
-from eventcalendar.ui.widgets.image_area import ImageAttachmentArea
+from eventcalendar.ui.widgets.image_area import ImageAttachmentArea, ImageAttachmentPayload
 from eventcalendar.ui.widgets.api_key_dialog import APIKeySetupDialog
 from eventcalendar.ui.preview import parse_event_text, format_date_display
 from eventcalendar.ui.error_messages import get_user_friendly_error
@@ -843,7 +843,8 @@ class NLCalendarCreator(QMainWindow):
         self.show_progress_signal.emit(True)
 
         # Submit to thread pool
-        future = self._executor.submit(self._create_event_thread)
+        image_payloads = list(self.image_area.image_data)
+        future = self._executor.submit(self._create_event_thread, event_description, image_payloads)
         with self._threads_lock:
             self._active_futures.add(future)
         future.add_done_callback(self._on_future_done)
@@ -896,12 +897,11 @@ class NLCalendarCreator(QMainWindow):
 
         return True
 
-    def _create_event_thread(self) -> None:
+    def _create_event_thread(self, event_description: str, image_payloads: List[ImageAttachmentPayload]) -> None:
         """Worker thread for event creation."""
         try:
-            event_description = self.text_input.toPlainText().strip()
             image_data = [
-                img.materialize() for img in self.image_area.image_data
+                img.materialize(include_base64=False) for img in image_payloads
             ]
 
             def status_callback(msg: str) -> None:

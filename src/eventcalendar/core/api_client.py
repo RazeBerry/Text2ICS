@@ -127,9 +127,11 @@ Current timezone: {user_timezone}
             fn for _, fn, _, _ in Formatter().parse(self.USER_PROMPT_TEMPLATE) if fn
         ]
         required_keys = {'event_description', 'day_name', 'formatted_date', 'user_timezone'}
-        assert set(template_keys) == required_keys, (
-            f"Template mismatch! Expected keys {required_keys} but got {set(template_keys)}"
-        )
+        found_keys = set(template_keys)
+        if found_keys != required_keys:
+            raise ValueError(
+                f"Template mismatch! Expected keys {required_keys} but got {found_keys}"
+            )
 
     def upload_to_gemini(self, path: str, mime_type: Optional[str] = None):
         """Upload a file to Gemini.
@@ -162,7 +164,7 @@ Current timezone: {user_timezone}
     def get_event_data(
         self,
         event_description: str,
-        image_data: List[Tuple[str, str, str]],
+        image_data: List[Tuple[str, str, Optional[str]]],
         status_callback: Callable[[str], None]
     ) -> Optional[List[Dict]]:
         """Get event data from the LLM without building ICS files.
@@ -232,7 +234,7 @@ Current timezone: {user_timezone}
 
     def _prepare_image_history(
         self,
-        image_data: List[Tuple[str, str, str]]
+        image_data: List[Tuple[str, str, Optional[str]]]
     ) -> List[Dict]:
         """Upload images and prepare chat history.
 
@@ -323,8 +325,14 @@ Current timezone: {user_timezone}
         Raises:
             ValueError: If JSON parsing fails.
         """
-        # Remove potential markdown code block fences
-        cleaned = response_text.strip().removeprefix("```json").removesuffix("```").strip()
+        # Remove potential markdown code block fences (Python 3.8 compatible).
+        cleaned = response_text.strip()
+        if cleaned.startswith("```"):
+            first_newline = cleaned.find("\n")
+            cleaned = cleaned[first_newline + 1:] if first_newline != -1 else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
 
         try:
             return json.loads(cleaned)
@@ -391,7 +399,7 @@ Current timezone: {user_timezone}
     def create_calendar_event(
         self,
         event_description: str,
-        image_data: List[Tuple[str, str, str]],
+        image_data: List[Tuple[str, str, Optional[str]]],
         status_callback: Callable[[str], None]
     ) -> str:
         """Backwards-compatible helper that returns ICS text for the requested events.
