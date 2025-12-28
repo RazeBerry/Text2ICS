@@ -12,14 +12,14 @@ Spacing follows a harmonious scale with generous whitespace.
 # Modify these constants to change fonts globally across the application.
 
 FONT_FAMILIES = {
-    # Using SF Mono for everything per user request
-    "sans": "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+    # Geist - Vercel's modern, technical sans-serif
+    "sans": "'Geist', -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
 
-    # Using SF Mono for everything per user request
-    "serif": "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+    # Geist for consistency
+    "serif": "'Geist', -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
 
-    # Monospace for code and API keys
-    "mono": "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+    # Geist Mono for code and API keys
+    "mono": "'Geist Mono', 'SF Mono', 'Monaco', 'Menlo', monospace",
 }
 
 # Convenience aliases for direct import
