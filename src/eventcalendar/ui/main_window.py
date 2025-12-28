@@ -33,7 +33,7 @@ from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_st
 from eventcalendar.storage.key_manager import load_api_key, check_and_warn_legacy_storage
 from eventcalendar.ui.theme.colors import get_color
 from eventcalendar.ui.theme.scales import (
-    TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS, SHADOW_SCALE
+    TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS, SHADOW_SCALE, FONT_SANS
 )
 from eventcalendar.ui.theme.manager import ThemeManager, toggle_theme
 from eventcalendar.ui.styles.base import px
@@ -147,14 +147,11 @@ class NLCalendarCreator(QMainWindow):
         header_layout.setContentsMargins(SPACING_SCALE["md"], 0, 0, 0)
         header_layout.setSpacing(SPACING_SCALE["xs"])
 
-        # System sans-serif font for clean, native look
-        SYSTEM_FONT = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif"
-
         # Title - large, semi-bold sans-serif
         self.title_label = QLabel("Create a new event")
         self.title_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {SYSTEM_FONT};
+                font-family: {FONT_SANS};
                 font-size: 28px;
                 font-weight: 600;
                 letter-spacing: -0.01em;
@@ -169,7 +166,7 @@ class NLCalendarCreator(QMainWindow):
         )
         self.subtitle_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {SYSTEM_FONT};
+                font-family: {FONT_SANS};
                 font-size: 15px;
                 font-weight: 400;
                 color: {get_color('text_secondary')};
@@ -534,10 +531,9 @@ class NLCalendarCreator(QMainWindow):
             accent_bar.setStyleSheet(f"background-color: {get_color('accent')};")
 
         # Update title and subtitle with system sans-serif
-        SYSTEM_FONT = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif"
         self.title_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {SYSTEM_FONT};
+                font-family: {FONT_SANS};
                 font-size: 28px;
                 font-weight: 600;
                 letter-spacing: -0.01em;
@@ -548,7 +544,7 @@ class NLCalendarCreator(QMainWindow):
 
         self.subtitle_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {SYSTEM_FONT};
+                font-family: {FONT_SANS};
                 font-size: 15px;
                 font-weight: 400;
                 color: {get_color('text_secondary')};

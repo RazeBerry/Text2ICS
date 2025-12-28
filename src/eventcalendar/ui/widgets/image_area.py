@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget, QFrame
 
 from eventcalendar.config.constants import SUPPORTED_IMAGE_EXTENSIONS
 from eventcalendar.ui.theme.colors import get_color
-from eventcalendar.ui.theme.scales import SPACING_SCALE, BORDER_RADIUS
+from eventcalendar.ui.theme.scales import SPACING_SCALE, BORDER_RADIUS, FONT_SANS
 from eventcalendar.ui.styles.base import px
 
 logger = logging.getLogger(__name__)
@@ -62,9 +62,6 @@ class ImageAttachmentArea(QFrame):
     # Signal emitted when images are added/cleared
     images_changed = pyqtSignal(bool)  # True when images added, False when cleared
 
-    # Explicit sans-serif font stack - must match the rest of the UI
-    SANS_SERIF_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
-
     def __init__(self, parent=None):
         """Initialize the image attachment area.
 
@@ -96,7 +93,7 @@ class ImageAttachmentArea(QFrame):
         self.section_label = QLabel("ATTACH IMAGE")
         self.section_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 12px;
                 font-weight: 600;
                 letter-spacing: 0.05em;
@@ -113,7 +110,7 @@ class ImageAttachmentArea(QFrame):
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 28px;
                 color: {get_color('border_medium')};
             }}
@@ -125,7 +122,7 @@ class ImageAttachmentArea(QFrame):
         self.primary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.primary_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 15px;
                 font-weight: 400;
                 color: {get_color('text_tertiary')};
@@ -139,7 +136,7 @@ class ImageAttachmentArea(QFrame):
         self.secondary_label.setWordWrap(True)
         self.secondary_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 13px;
                 font-weight: 400;
                 color: {get_color('text_placeholder')};
@@ -208,7 +205,7 @@ class ImageAttachmentArea(QFrame):
         self.section_label.setText("ATTACH IMAGE")
         self.section_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 12px;
                 font-weight: 600;
                 letter-spacing: 0.05em;
@@ -218,7 +215,7 @@ class ImageAttachmentArea(QFrame):
         self.icon_label.setText("\u25A1")  # Empty square
         self.icon_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 28px;
                 color: {get_color('border_medium')};
             }}
@@ -226,7 +223,7 @@ class ImageAttachmentArea(QFrame):
         self.primary_label.setText("Drop image here")
         self.primary_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 15px;
                 font-weight: 400;
                 color: {get_color('text_tertiary')};
@@ -235,7 +232,7 @@ class ImageAttachmentArea(QFrame):
         self.secondary_label.setText("Flyers, screenshots, or photos")
         self.secondary_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 13px;
                 font-weight: 400;
                 color: {get_color('text_placeholder')};
@@ -251,7 +248,7 @@ class ImageAttachmentArea(QFrame):
         self.section_label.setText("IMAGE ATTACHED" if count == 1 else f"{count} IMAGES")
         self.section_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 12px;
                 font-weight: 600;
                 letter-spacing: 0.05em;
@@ -262,7 +259,7 @@ class ImageAttachmentArea(QFrame):
         self.icon_label.setText("\u2713")  # Checkmark
         self.icon_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 28px;
                 color: {get_color('accent')};
             }}
@@ -275,7 +272,7 @@ class ImageAttachmentArea(QFrame):
 
         self.primary_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 15px;
                 font-weight: 500;
                 color: {get_color('text_primary')};
@@ -285,7 +282,7 @@ class ImageAttachmentArea(QFrame):
         self.secondary_label.setText("Click Create Event to process")
         self.secondary_label.setStyleSheet(f"""
             QLabel {{
-                font-family: {self.SANS_SERIF_FONT};
+                font-family: {FONT_SANS};
                 font-size: 13px;
                 font-weight: 400;
                 color: {get_color('text_secondary')};

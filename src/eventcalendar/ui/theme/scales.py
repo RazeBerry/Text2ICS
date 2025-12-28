@@ -6,7 +6,31 @@ Typography uses a refined serif/sans-serif pairing for editorial warmth.
 Spacing follows a harmonious scale with generous whitespace.
 """
 
-# Typography Scale
+# =============================================================================
+# FONT FAMILIES - Single source of truth for all fonts
+# =============================================================================
+# Modify these constants to change fonts globally across the application.
+
+FONT_FAMILIES = {
+    # System sans-serif for UI elements (buttons, labels, body text)
+    "sans": "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif",
+
+    # Serif for editorial warmth (titles, display text)
+    "serif": "Georgia, 'Times New Roman', serif",
+
+    # Monospace for code and API keys
+    "mono": "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+}
+
+# Convenience aliases for direct import
+FONT_SANS = FONT_FAMILIES["sans"]
+FONT_SERIF = FONT_FAMILIES["serif"]
+FONT_MONO = FONT_FAMILIES["mono"]
+
+
+# =============================================================================
+# TYPOGRAPHY SCALE
+# =============================================================================
 # Primary: Georgia or system serif for warmth and readability
 # Secondary: SF Pro or system sans for UI elements
 # The combination evokes thoughtfulness and precision
@@ -17,63 +41,63 @@ TYPOGRAPHY_SCALE = {
         "weight": 400,
         "line_height": 1.15,
         "letter_spacing": "-0.02em",
-        "font_family": "Georgia, 'Times New Roman', serif",
+        "font_family": FONT_SERIF,
     },
     "title": {
         "size_px": 26,
         "weight": 400,
         "line_height": 1.2,
         "letter_spacing": "-0.01em",
-        "font_family": "Georgia, 'Times New Roman', serif",
+        "font_family": FONT_SERIF,
     },
     "headline": {
         "size_px": 18,
         "weight": 500,
         "line_height": 1.35,
         "letter_spacing": "0",
-        "font_family": "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+        "font_family": FONT_SANS,
     },
     "body": {
         "size_px": 15,
         "weight": 400,
         "line_height": 1.5,
         "letter_spacing": "0",
-        "font_family": "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+        "font_family": FONT_SANS,
     },
     "body_serif": {
         "size_px": 15,
         "weight": 400,
         "line_height": 1.6,
         "letter_spacing": "0.01em",
-        "font_family": "Georgia, 'Times New Roman', serif",
+        "font_family": FONT_SERIF,
     },
     "caption": {
         "size_px": 13,
         "weight": 400,
         "line_height": 1.4,
         "letter_spacing": "0.01em",
-        "font_family": "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+        "font_family": FONT_SANS,
     },
     "footnote": {
         "size_px": 11,
         "weight": 400,
         "line_height": 1.3,
         "letter_spacing": "0.02em",
-        "font_family": "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+        "font_family": FONT_SANS,
     },
     "label": {
         "size_px": 12,
         "weight": 600,
         "line_height": 1.2,
         "letter_spacing": "0.05em",
-        "font_family": "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+        "font_family": FONT_SANS,
     },
     "mono": {
         "size_px": 14,
         "weight": 400,
         "line_height": 1.5,
         "letter_spacing": "0",
-        "font_family": "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+        "font_family": FONT_MONO,
     },
 }
 
