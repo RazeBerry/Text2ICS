@@ -24,7 +24,7 @@ from PyQt6.QtGui import QCloseEvent, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QLabel, QMessageBox, QSizePolicy, QFrame,
-    QGraphicsOpacityEffect
+    QGraphicsOpacityEffect, QScrollArea
 )
 
 from eventcalendar.config.settings import UI_CONFIG
@@ -150,9 +150,37 @@ class NLCalendarCreator(QMainWindow):
         accent_bar.setStyleSheet(f"background-color: {get_color('accent')};")
         outer_layout.addWidget(accent_bar)
 
+        # Scroll area for responsive small-window support
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setStyleSheet(f"""
+            QScrollArea {{
+                background-color: {get_color('background_primary')};
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                background-color: {get_color('background_secondary')};
+                width: 8px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {get_color('border')};
+                border-radius: 4px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background-color: {get_color('text_tertiary')};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+        """)
+
         # Main content wrapper with generous padding
         content_wrapper = QWidget()
         content_wrapper.setObjectName("contentWrapper")
+        content_wrapper.setMinimumWidth(400)  # Minimum content width
         content_layout = QVBoxLayout(content_wrapper)
         content_layout.setSpacing(SPACING_SCALE["lg"])
         content_layout.setContentsMargins(
@@ -164,7 +192,8 @@ class NLCalendarCreator(QMainWindow):
         self._add_main_content(content_layout)
         self._add_footer_section(content_layout)
 
-        outer_layout.addWidget(content_wrapper, 1)
+        scroll_area.setWidget(content_wrapper)
+        outer_layout.addWidget(scroll_area, 1)
         self._setup_overlay()
         self._setup_preview_timer()
 
@@ -204,10 +233,11 @@ class NLCalendarCreator(QMainWindow):
         """)
         header_layout.addWidget(self.title_label)
 
-        # Subtitle - regular weight sans-serif
+        # Subtitle - regular weight sans-serif (word wrap for small windows)
         self.subtitle_label = QLabel(
             "Describe your event naturally, or drop an image of a flyer"
         )
+        self.subtitle_label.setWordWrap(True)
         self.subtitle_label.setStyleSheet(f"""
             QLabel {{
                 font-family: {FONT_SANS};
@@ -238,6 +268,7 @@ class NLCalendarCreator(QMainWindow):
     def _add_input_panel(self, layout: QHBoxLayout) -> None:
         """Add the left panel with text input and live preview."""
         left_panel = QWidget()
+        left_panel.setMinimumWidth(220)  # Prevent panel from disappearing
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(SPACING_SCALE["sm"])
@@ -331,6 +362,7 @@ class NLCalendarCreator(QMainWindow):
         preview_layout.addWidget(self.preview_label)
 
         self.preview_event_title = QLabel("Event title \u2022 Date \u2022 Time")
+        self.preview_event_title.setWordWrap(True)
         self.preview_event_title.setStyleSheet(f"""
             QLabel {{
                 font-family: {body_style["font_family"]};
@@ -348,6 +380,7 @@ class NLCalendarCreator(QMainWindow):
     def _add_image_panel(self, layout: QHBoxLayout) -> None:
         """Add the right panel with image attachment area."""
         right_panel = QWidget()
+        right_panel.setMinimumWidth(160)  # Prevent panel from disappearing
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)  # No spacing - label goes inside the area

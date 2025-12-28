@@ -120,6 +120,7 @@ class ImageAttachmentArea(QFrame):
         # Primary text - explicit sans-serif to match input placeholder
         self.primary_label = QLabel("Drop image here")
         self.primary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.primary_label.setWordWrap(True)
         self.primary_label.setStyleSheet(f"""
             QLabel {{
                 font-family: {FONT_SANS};
