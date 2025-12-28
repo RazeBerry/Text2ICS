@@ -1,34 +1,34 @@
-"""Centralized configuration for EventCalendarGenerator."""
+"""
+config.py - Backward Compatibility Layer
 
-from dataclasses import dataclass
-from typing import Tuple
+This file re-exports all public symbols from the refactored package
+to maintain backward compatibility with existing imports.
 
+DEPRECATED: Import from eventcalendar.config instead.
+Example: from eventcalendar.config import API_CONFIG
+"""
 
-@dataclass(frozen=True)
-class APIConfig:
-    """Configuration for API interactions."""
-    model_name: str = "gemini-2.0-flash"
-    max_retries: int = 5
-    base_delay: float = 1.0
-    max_backoff: float = 10.0
-    timeout_seconds: float = 60.0
-    max_output_tokens: int = 8192
-    temperature: float = 0.0
-    top_p: float = 0.3
-    top_k: int = 64
+import sys
+import os
+import warnings
 
+# Add src to path for package imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-@dataclass(frozen=True)
-class UIConfig:
-    """Configuration for UI behavior."""
-    preview_debounce_ms: int = 120
-    temp_file_cleanup_delay_ms: int = 60_000
-    user_decision_timeout_s: int = 30
-    min_window_size: Tuple[int, int] = (600, 450)
-    default_window_size: Tuple[int, int] = (700, 500)
-    executor_max_workers: int = 2
+# Emit deprecation warning on import
+warnings.warn(
+    "Importing from config.py is deprecated. "
+    "Use 'from eventcalendar.config import ...' instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
+# Re-export configuration
+from eventcalendar.config.settings import APIConfig, UIConfig, API_CONFIG, UI_CONFIG
 
-# Default configuration instances
-API_CONFIG = APIConfig()
-UI_CONFIG = UIConfig()
+__all__ = [
+    'APIConfig',
+    'UIConfig',
+    'API_CONFIG',
+    'UI_CONFIG',
+]

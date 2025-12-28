@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eventcalendar"
+version = "2.0.0"
+description = "Natural Language Calendar Event Creator - Convert text and images to calendar events using AI"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Scheduling",
+]
+dependencies = [
+    "PyQt6>=6.0.0",
+    "google-generativeai>=0.3.0",
+    "icalendar>=5.0.0",
+    "pytz>=2023.3",
+    "python-dateutil>=2.8.0",
+    "tzlocal>=4.0",
+    "python-dotenv>=1.0.0",
+    "keyring>=24.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-qt>=4.0.0",
+]
+
+[project.scripts]
+eventcalendar = "eventcalendar.__main__:main"
+
+[project.gui-scripts]
+eventcalendar-gui = "eventcalendar.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v"

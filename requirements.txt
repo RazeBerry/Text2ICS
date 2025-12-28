@@ -6,3 +6,4 @@ pytz>=2023.3
 python-dateutil>=2.8.0
 tzlocal>=4.0
 python-dotenv>=1.0.0
+keyring>=24.3.0
