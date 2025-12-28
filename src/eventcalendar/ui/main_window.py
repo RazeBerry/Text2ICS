@@ -16,8 +16,11 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import QCloseEvent, QFont
+from PyQt6.QtCore import (
+    Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve,
+    QSequentialAnimationGroup, QParallelAnimationGroup, pyqtProperty, QPointF
+)
+from PyQt6.QtGui import QCloseEvent, QFont, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QLabel, QMessageBox, QSizePolicy, QFrame,
@@ -46,6 +49,43 @@ from eventcalendar.ui.preview import parse_event_text, format_date_display
 from eventcalendar.ui.error_messages import get_user_friendly_error
 
 logger = logging.getLogger(__name__)
+
+
+class WaveDot(QWidget):
+    """A single dot widget with animatable vertical offset for wave effect.
+
+    The dot bobs up and down when its offset property is animated,
+    creating a smooth wave motion when multiple dots are staggered.
+    """
+
+    def __init__(self, color: str, size: int = 10, parent=None):
+        super().__init__(parent)
+        self._offset = 0.0
+        self._color = QColor(color)
+        self._size = size
+        # Height allows room for vertical movement
+        self.setFixedSize(size + 4, size * 3)
+
+    @pyqtProperty(float)
+    def offset(self) -> float:
+        return self._offset
+
+    @offset.setter
+    def offset(self, value: float) -> None:
+        self._offset = value
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(self._color)
+        painter.setPen(QPen(Qt.PenStyle.NoPen))
+
+        # Draw circle at horizontal center, vertical center + offset
+        center_x = self.width() / 2
+        center_y = self.height() / 2 + self._offset
+        radius = self._size / 2
+        painter.drawEllipse(QPointF(center_x, center_y), radius, radius)
 
 
 class NLCalendarCreator(QMainWindow):
@@ -417,16 +457,65 @@ class NLCalendarCreator(QMainWindow):
         card_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.setSpacing(SPACING_SCALE["sm"])
 
-        # Animated terracotta dot
-        self.loading_dot = QLabel("\u25CF")
-        self.loading_dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.loading_dot.setStyleSheet(f"""
-            QLabel {{
-                color: {get_color('accent')};
-                font-size: 24px;
-            }}
-        """)
-        card_layout.addWidget(self.loading_dot)
+        # Three-dot wave animation container
+        dots_container = QWidget()
+        dots_layout = QHBoxLayout(dots_container)
+        dots_layout.setContentsMargins(0, 0, 0, 0)
+        dots_layout.setSpacing(SPACING_SCALE["sm"])
+        dots_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Create three wave dots
+        accent_color = get_color('accent')
+        self._wave_dots = []
+        for _ in range(3):
+            dot = WaveDot(accent_color, size=10)
+            self._wave_dots.append(dot)
+            dots_layout.addWidget(dot)
+
+        card_layout.addWidget(dots_container)
+
+        # Set up wave animation - each dot bobs with phase offset
+        self._wave_animation = QParallelAnimationGroup()
+        wave_height = 8.0  # Pixels to move up/down
+        wave_duration = 600  # ms for one up-down cycle
+
+        for i, dot in enumerate(self._wave_dots):
+            # Each dot gets a sequential up-down animation
+            dot_seq = QSequentialAnimationGroup()
+
+            # Phase delay: stagger each dot by 1/3 of the cycle
+            phase_delay = i * (wave_duration // 3)
+
+            # Move up
+            up_anim = QPropertyAnimation(dot, b"offset")
+            up_anim.setDuration(wave_duration // 2)
+            up_anim.setStartValue(0.0)
+            up_anim.setEndValue(-wave_height)
+            up_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+            # Move down
+            down_anim = QPropertyAnimation(dot, b"offset")
+            down_anim.setDuration(wave_duration // 2)
+            down_anim.setStartValue(-wave_height)
+            down_anim.setEndValue(0.0)
+            down_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+            dot_seq.addAnimation(up_anim)
+            dot_seq.addAnimation(down_anim)
+            dot_seq.setLoopCount(-1)
+
+            # Create wrapper to handle phase offset
+            phase_wrapper = QSequentialAnimationGroup()
+            if phase_delay > 0:
+                # Add a pause for phase offset using a dummy animation
+                pause = QPropertyAnimation(dot, b"offset")
+                pause.setDuration(phase_delay)
+                pause.setStartValue(0.0)
+                pause.setEndValue(0.0)
+                phase_wrapper.addAnimation(pause)
+            phase_wrapper.addAnimation(dot_seq)
+
+            self._wave_animation.addAnimation(phase_wrapper)
 
         self.processing_label = QLabel("Processing...")
         headline_style = TYPOGRAPHY_SCALE["headline"]
@@ -670,7 +759,12 @@ class NLCalendarCreator(QMainWindow):
             self.overlay.setGeometry(self.centralWidget().rect())
             self.overlay.show()
             self.overlay.raise_()
+            # Reset dots to starting position and start wave
+            for dot in self._wave_dots:
+                dot.offset = 0.0
+            self._wave_animation.start()
         else:
+            self._wave_animation.stop()
             self.overlay.hide()
 
     # --- Event Processing ---
