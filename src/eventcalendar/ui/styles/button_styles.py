@@ -112,6 +112,38 @@ class ButtonStyles:
         """
 
     @staticmethod
+    def subtle() -> str:
+        """Generate subtle button style for secondary actions.
+
+        Anthropic-inspired: visible but understated with warm undertones.
+        Features a light background, subtle border, and refined hover state.
+
+        Returns:
+            Stylesheet string for subtle buttons.
+        """
+        return f"""
+            QPushButton {{
+                background-color: {get_color('background_secondary')};
+                color: {get_color('text_secondary')};
+                border: 1px solid {get_color('border_light')};
+                border-radius: {px(BORDER_RADIUS["md"])};
+                font-family: {TYPOGRAPHY_SCALE["body"]["font_family"]};
+                font-size: {px(TYPOGRAPHY_SCALE["footnote"]["size_px"])};
+                font-weight: 500;
+                padding: {px(SPACING_SCALE["xs"])} {px(SPACING_SCALE["md"])};
+            }}
+            QPushButton:hover {{
+                background-color: {get_color('background_tertiary')};
+                border-color: {get_color('border_medium')};
+                color: {get_color('text_primary')};
+            }}
+            QPushButton:pressed {{
+                background-color: {get_color('border_light')};
+                border-color: {get_color('border_medium')};
+            }}
+        """
+
+    @staticmethod
     def icon() -> str:
         """Generate icon button style (minimal, square).
 
