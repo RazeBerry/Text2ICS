@@ -12,11 +12,11 @@ Spacing follows a harmonious scale with generous whitespace.
 # Modify these constants to change fonts globally across the application.
 
 FONT_FAMILIES = {
-    # System sans-serif for UI elements (buttons, labels, body text)
-    "sans": "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif",
+    # Using SF Mono for everything per user request
+    "sans": "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
 
-    # Serif for editorial warmth (titles, display text)
-    "serif": "Georgia, 'Times New Roman', serif",
+    # Using SF Mono for everything per user request
+    "serif": "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
 
     # Monospace for code and API keys
     "mono": "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
