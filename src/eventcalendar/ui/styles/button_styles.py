@@ -8,7 +8,7 @@ tertiary actions are ghost-style with hover reveal.
 """
 
 from eventcalendar.ui.theme.colors import get_color
-from eventcalendar.ui.theme.scales import BORDER_RADIUS
+from eventcalendar.ui.theme.scales import BORDER_RADIUS, TYPOGRAPHY_SCALE, SPACING_SCALE
 from eventcalendar.ui.styles.base import px
 
 
