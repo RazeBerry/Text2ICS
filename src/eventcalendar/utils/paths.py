@@ -1,6 +1,5 @@
 """Path utilities for resource access."""
 
-import os
 import sys
 from pathlib import Path
 

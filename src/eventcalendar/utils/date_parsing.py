@@ -1,7 +1,7 @@
 """Date and time parsing utilities."""
 
 import re
-from typing import Optional, Dict, List
+from typing import Optional
 from datetime import datetime, timedelta
 
 from dateutil import parser as dateutil_parser

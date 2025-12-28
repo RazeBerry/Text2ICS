@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import Qt, pyqtSignal, QByteArray
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QImage, QPixmap
-from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget, QFrame
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QFrame
 
 from eventcalendar.config.constants import SUPPORTED_IMAGE_EXTENSIONS
 from eventcalendar.ui.theme.colors import get_color

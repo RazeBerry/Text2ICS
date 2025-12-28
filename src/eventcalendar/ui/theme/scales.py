@@ -6,6 +6,14 @@ Typography uses a refined serif/sans-serif pairing for editorial warmth.
 Spacing follows a harmonious scale with generous whitespace.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from PyQt6.QtGui import QFont
+    from PyQt6.QtWidgets import QApplication
+
 # =============================================================================
 # FONT FAMILIES - Single source of truth for all fonts
 # =============================================================================

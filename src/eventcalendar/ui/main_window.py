@@ -20,7 +20,7 @@ from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve,
     QSequentialAnimationGroup, QParallelAnimationGroup, pyqtProperty, QPointF
 )
-from PyQt6.QtGui import QCloseEvent, QFont, QPainter, QColor, QPen
+from PyQt6.QtGui import QCloseEvent, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QLabel, QMessageBox, QSizePolicy, QFrame,
@@ -36,10 +36,10 @@ from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_st
 from eventcalendar.storage.key_manager import load_api_key, check_and_warn_legacy_storage
 from eventcalendar.ui.theme.colors import get_color
 from eventcalendar.ui.theme.scales import (
-    TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS, SHADOW_SCALE,
-    FONT_SANS, get_font, set_app_font
+    TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS,
+    FONT_SANS, set_app_font
 )
-from eventcalendar.ui.theme.manager import ThemeManager, toggle_theme
+from eventcalendar.ui.theme.manager import toggle_theme
 from eventcalendar.ui.styles.base import px
 from eventcalendar.ui.styles.manager import StyleManager
 from eventcalendar.ui.styles.button_styles import ButtonStyles
@@ -754,9 +754,7 @@ class NLCalendarCreator(QMainWindow):
         # Update live preview text
         self.update_live_preview()
 
-        # Update separator line
-        separator = self.centralWidget().findChild(QFrame)
-        # Find the separator (HLine frame)
+        # Update separator line (HLine frame)
         for child in self.centralWidget().findChildren(QFrame):
             if child.frameShape() == QFrame.Shape.HLine:
                 child.setStyleSheet(f"""
