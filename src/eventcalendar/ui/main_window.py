@@ -150,69 +150,21 @@ class NLCalendarCreator(QMainWindow):
         accent_bar.setStyleSheet(f"background-color: {get_color('accent')};")
         outer_layout.addWidget(accent_bar)
 
-        # Scroll area for responsive small-window support (header + main content only)
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll_area.setStyleSheet(f"""
-            QScrollArea {{
-                background-color: {get_color('background_primary')};
-                border: none;
-            }}
-            QScrollBar:vertical {{
-                background-color: transparent;
-                width: 8px;
-                margin: 4px 2px 4px 0px;
-            }}
-            QScrollBar::handle:vertical {{
-                background-color: {get_color('text_placeholder')};
-                border-radius: 3px;
-                min-height: 20px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background-color: {get_color('text_tertiary')};
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-                background: transparent;
-                height: 0px;
-            }}
-        """)
-
-        # Scrollable content: header + main content (NOT footer)
+        # Main content wrapper with generous padding
         content_wrapper = QWidget()
         content_wrapper.setObjectName("contentWrapper")
         content_layout = QVBoxLayout(content_wrapper)
         content_layout.setSpacing(SPACING_SCALE["lg"])
         content_layout.setContentsMargins(
             SPACING_SCALE["xl"], SPACING_SCALE["xl"],
-            SPACING_SCALE["xl"], SPACING_SCALE["md"]
+            SPACING_SCALE["xl"], SPACING_SCALE["lg"]
         )
 
         self._add_header_section(content_layout)
         self._add_main_content(content_layout)
+        self._add_footer_section(content_layout)
 
-        scroll_area.setWidget(content_wrapper)
-        outer_layout.addWidget(scroll_area, 1)
-
-        # Footer is OUTSIDE scroll area - always visible at bottom
-        footer_wrapper = QWidget()
-        footer_wrapper.setObjectName("footerWrapper")
-        footer_wrapper.setStyleSheet(f"""
-            #footerWrapper {{
-                background-color: {get_color('background_primary')};
-            }}
-        """)
-        footer_layout = QVBoxLayout(footer_wrapper)
-        footer_layout.setSpacing(0)
-        footer_layout.setContentsMargins(
-            SPACING_SCALE["xl"], 0,
-            SPACING_SCALE["xl"], SPACING_SCALE["md"]
-        )
-        self._add_footer_section(footer_layout)
-        outer_layout.addWidget(footer_wrapper)
-
+        outer_layout.addWidget(content_wrapper, 1)
         self._setup_overlay()
         self._setup_preview_timer()
 
@@ -275,7 +227,7 @@ class NLCalendarCreator(QMainWindow):
         content_layout = QHBoxLayout(content_widget)
         content_layout.setSpacing(SPACING_SCALE["lg"])
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)  # Align panels to top
+        # No alignment - let panels expand naturally
 
         # Left panel: text input (larger, primary)
         self._add_input_panel(content_layout)
@@ -344,7 +296,7 @@ class NLCalendarCreator(QMainWindow):
                 color: {get_color('text_placeholder')};
             }}
         """)
-        self.text_input.setMinimumHeight(140)
+        self.text_input.setMinimumHeight(80)  # Reduced to allow preview to show
         self.text_input.textChanged.connect(self._on_text_changed)
         card_layout.addWidget(self.text_input, 1)
 
@@ -353,6 +305,7 @@ class NLCalendarCreator(QMainWindow):
         # Live preview with terracotta accent
         preview_container = QFrame()
         preview_container.setObjectName("previewContainer")
+        preview_container.setMinimumHeight(50)  # Prevent preview from disappearing
         preview_container.setStyleSheet(f"""
             #previewContainer {{
                 background-color: {get_color('background_tertiary')};
