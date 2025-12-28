@@ -46,9 +46,25 @@ pip install PyQt6 google-generativeai
 
 ## Setting Up the Gemini API Key
 
-The application requires a Google Gemini API key to function. You can set it up in several ways:
+**Security First:** The application uses **OS-level encrypted storage** (Keychain on macOS) for your API key. Your key is never stored in plain text in the project directory.
 
-### Option 1: Environment Variable (Recommended)
+### 🔒 Automatic Security Features
+
+- **Automatic Migration:** If you have an old API key in a legacy `.env` file, the app will automatically migrate it to secure storage and warn you
+- **Input Validation:** API keys are sanitized to remove quotes, spaces, and invalid characters
+- **Secure Permissions:** Fallback `.env` files are created with 0o600 permissions (owner-only access)
+- **No Git Exposure:** Legacy `.env` files in the project directory are gitignored to prevent accidental commits
+
+### Recommended Setup (Easiest & Most Secure)
+
+**Just run the app!** On first launch, you'll see a setup dialog:
+1. Click "Open Google AI Studio" to get your free API key
+2. Copy the key and paste it into the app
+3. Click "Save & Continue"
+
+Your key will be stored in **macOS Keychain** (encrypted) and persist across sessions.
+
+### Option 1: Environment Variable (Advanced - Overrides everything)
 
 #### macOS/Linux:
 ```bash
@@ -72,30 +88,32 @@ Then restart your command prompt.
 ```
 Then restart PowerShell.
 
-### Option 2: .env File
-Create a `.env` file in the project root:
-```
-GEMINI_API_KEY=your-api-key-here
-```
+### Option 2: Manual Fallback .env File (Advanced)
 
-Then install and use python-dotenv:
-```bash
-pip install python-dotenv
-```
+**Note:** The app handles this automatically - you usually don't need to do this manually.
 
-Add to the top of your script:
-```python
-from dotenv import load_dotenv
-load_dotenv()
-```
+If keyring is unavailable, the app will create a secure `.env` file in your user config directory:
+- macOS: `~/Library/Application Support/EventCalendarGenerator/.env`
+- Linux: `$XDG_CONFIG_HOME/EventCalendarGenerator/.env` (or `~/.config/EventCalendarGenerator/.env`)
+- Windows: `%APPDATA%\\EventCalendarGenerator\\.env`
+
+The app automatically sets secure permissions (0o600 - owner-only access) on this file.
 
 ## Running the Application
 
-1. Ensure your environment variable is set and virtual environment is activated
+1. Activate your virtual environment (if using one)
 2. Run the application:
 ```bash
 python Calender.py
 ```
+3. On first launch, you'll be prompted to enter your API key - it will be securely stored
+
+### 🔐 Security Notes
+
+- **Never commit `.env` files** with real API keys to version control
+- The app stores keys in **macOS Keychain** (encrypted by the OS)
+- Legacy `.env` files in the project directory are **automatically migrated** to secure storage
+- You'll be warned if your key is stored insecurely and offered automatic migration
 
 ## Testing the API Client
 
