@@ -187,8 +187,7 @@ class NLCalendarCreator(QMainWindow):
         """Add header with clean sans-serif typography."""
         header = QWidget()
         header_layout = QVBoxLayout(header)
-        # Add left margin to align with card content (card has 24px internal padding)
-        header_layout.setContentsMargins(SPACING_SCALE["md"], 0, 0, 0)
+        header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(SPACING_SCALE["xs"])
 
         # Title - large, semi-bold sans-serif

@@ -47,6 +47,9 @@ eventcalendar = "eventcalendar.__main__:main"
 [project.gui-scripts]
 eventcalendar-gui = "eventcalendar.__main__:main"
 
+[tool.setuptools.package-data]
+eventcalendar = ["resources/*.png", "resources/*.icns"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -5,6 +5,7 @@ Usage: python -m eventcalendar
 
 import sys
 import logging
+from pathlib import Path
 
 
 def main():
@@ -17,12 +18,18 @@ def main():
 
     # Import PyQt6 and create application
     from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtGui import QIcon
     from eventcalendar.ui.main_window import NLCalendarCreator
     from eventcalendar.storage.key_manager import load_api_key
     from eventcalendar.ui.widgets.api_key_dialog import APIKeySetupDialog
 
     app = QApplication(sys.argv)
     app.setApplicationName("EventCalendarGenerator")
+
+    # Set application icon (resolved relative to package, not cwd)
+    icon_path = Path(__file__).parent / "resources" / "icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     # Check for API key and show setup if needed
     api_key = load_api_key()
