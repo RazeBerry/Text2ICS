@@ -1,15 +1,41 @@
+import os
+import subprocess
+import sys
 from datetime import datetime
 from typing import Any
 
 import pytest
 from icalendar import Calendar
-from PyQt6.QtWidgets import QApplication
 
-import Calender
+# Ensure local imports work without requiring an editable install.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+
+from eventcalendar.core.ics_builder import combine_ics_strings
+from eventcalendar.ui.preview import parse_event_text, format_date_display
+from eventcalendar.ui.theme.colors import COLORS
+
+
+def _pyqt6_importable() -> bool:
+    """Check PyQt6 importability in a subprocess to avoid hard crashes in-process."""
+    result = subprocess.run(
+        [sys.executable, "-c", "import PyQt6.QtWidgets"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+RUN_UI_TESTS = os.environ.get("EVENTCALENDAR_RUN_UI_TESTS") == "1"
+UI_AVAILABLE = RUN_UI_TESTS and _pyqt6_importable()
 
 
 @pytest.fixture(scope="module")
-def qt_app() -> QApplication:
+def qt_app() -> Any:
+    if not UI_AVAILABLE:
+        pytest.skip("UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+    from PyQt6.QtWidgets import QApplication
+
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
@@ -59,7 +85,7 @@ def test_combine_ics_strings_preserves_timezone_and_rewrites_uids() -> None:
         "END:VCALENDAR\r\n"
     )
 
-    combined = Calender.combine_ics_strings([ics_one, ics_two])
+    combined = combine_ics_strings([ics_one, ics_two])
     merged = Calendar.from_ical(combined.encode("utf-8"))
 
     vevents = list(merged.walk("VEVENT"))
@@ -81,12 +107,41 @@ def test_combine_ics_strings_preserves_timezone_and_rewrites_uids() -> None:
 
 def test_combine_ics_strings_requires_input() -> None:
     with pytest.raises(ValueError):
-        Calender.combine_ics_strings([])
+        combine_ics_strings([])
 
 
-def test_process_event_uses_executor(qt_app: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_parse_event_text_extracts_components() -> None:
+    ref = datetime(2024, 4, 1, 12, 0, 0)
+    parsed = parse_event_text("Dinner with Mia next Tuesday at 7pm", reference_date=ref)
+
+    assert parsed["title"] == "Dinner Mia at"
+    assert parsed["date"] == "Apr 09"
+    assert parsed["time"] == "7pm"
+    assert parsed["location"] is None
+
+
+def test_parse_event_text_handles_simple_title() -> None:
+    parsed = parse_event_text("Project kickoff", reference_date=datetime(2024, 4, 1, 12, 0, 0))
+
+    assert parsed["title"] == "Project kickoff"
+    assert parsed["date"] is None
+    assert parsed["time"] is None
+
+
+def test_format_date_display_handles_relative_terms() -> None:
+    ref = datetime(2024, 4, 1, 12, 0, 0)
+    assert format_date_display("today", reference_date=ref) == "Apr 01"
+    assert format_date_display("tomorrow", reference_date=ref) == "Apr 02"
+    assert format_date_display("next friday", reference_date=ref) == "Apr 12"
+    assert format_date_display("March 30", reference_date=ref) == "Mar 30"
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_process_event_uses_executor(qt_app: Any) -> None:
     """Verify process_event uses ThreadPoolExecutor for background work."""
-    window = Calender.NLCalendarCreator()
+    from eventcalendar.ui.main_window import NLCalendarCreator
+
+    window = NLCalendarCreator()
     window.api_client = object()
     window.text_input.setPlainText("Test event at 7pm tomorrow")
 
@@ -100,106 +155,53 @@ def test_process_event_uses_executor(qt_app: QApplication, monkeypatch: pytest.M
         submitted_tasks.append({"fn": fn, "args": args, "kwargs": kwargs})
         return MockFuture()
 
-    # Replace the executor's submit method
     window._executor.submit = mock_submit
-
     window.process_event()
 
-    # Verify a task was submitted to the executor
     assert len(submitted_tasks) == 1
     assert submitted_tasks[0]["fn"] == window._create_event_thread
-
-    # Verify the executor exists and is a ThreadPoolExecutor
     assert hasattr(window, "_executor")
     assert window._executor is not None
 
     window.close()
 
 
-class FixedDateTime(datetime):
-    """Deterministic datetime for preview/date parsing tests."""
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_update_live_preview_populates_content(qt_app: Any) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
 
-    @classmethod
-    def now(cls, tz=None):  # type: ignore[override]
-        return cls(2024, 4, 1, 12, 0, 0, tzinfo=tz)
-
-
-def test_parse_event_text_extracts_components(
-    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
-    window = Calender.NLCalendarCreator()
-
-    parsed = window.parse_event_text("Dinner with Mia next Tuesday at 7pm")
-
-    assert parsed["title"] == "Dinner Mia at"
-    assert parsed["date"] == "Apr 09"
-    assert parsed["time"] == "7pm"
-    assert parsed["location"] is None
-
-    window.close()
-
-
-def test_parse_event_text_handles_simple_title(
-    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
-    window = Calender.NLCalendarCreator()
-
-    parsed = window.parse_event_text("Project kickoff")
-
-    assert parsed["title"] == "Project kickoff"
-    assert parsed["date"] is None
-    assert parsed["time"] is None
-
-    window.close()
-
-
-def test_format_date_display_handles_relative_terms(
-    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
-    window = Calender.NLCalendarCreator()
-
-    assert window.format_date_display("today") == "Apr 01"
-    assert window.format_date_display("tomorrow") == "Apr 02"
-    assert window.format_date_display("next friday") == "Apr 12"
-    assert window.format_date_display("March 30") == "Mar 30"
-
-    window.close()
-
-
-def test_update_live_preview_populates_content(
-    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
-    window = Calender.NLCalendarCreator()
+    window = NLCalendarCreator()
+    ref = datetime(2024, 4, 1, 12, 0, 0)
+    window.parse_event_text = lambda text: parse_event_text(text, reference_date=ref)  # type: ignore[assignment]
 
     window.text_input.setPlainText("Dinner with Mia next Tuesday at 7pm")
     window.update_live_preview()
 
     assert window.preview_event_title.text() == "Dinner Mia at \u2022 Apr 09 \u2022 7pm"
-    assert f"color: {Calender.COLORS['text_primary']}" in window.preview_event_title.styleSheet()
+    assert f"color: {COLORS['text_primary']}" in window.preview_event_title.styleSheet()
 
     window.close()
 
 
-def test_update_live_preview_resets_to_placeholder(
-    qt_app: QApplication, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(Calender, "datetime", FixedDateTime)
-    window = Calender.NLCalendarCreator()
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_update_live_preview_resets_to_placeholder(qt_app: Any) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+
+    window = NLCalendarCreator()
+    ref = datetime(2024, 4, 1, 12, 0, 0)
+    window.parse_event_text = lambda text: parse_event_text(text, reference_date=ref)  # type: ignore[assignment]
 
     window.text_input.setPlainText("Project kickoff")
     window.update_live_preview()
 
     assert window.preview_event_title.text() == "Project kickoff \u2022 Date \u2022 Time"
-    assert f"color: {Calender.COLORS['text_primary']}" in window.preview_event_title.styleSheet()
+    assert f"color: {COLORS['text_primary']}" in window.preview_event_title.styleSheet()
 
     window.text_input.setPlainText("")
     window.update_live_preview()
 
     assert window.preview_event_title.text() == "Event title \u2022 Date \u2022 Time"
-    assert f"color: {Calender.COLORS['text_tertiary']}" in window.preview_event_title.styleSheet()
+    assert f"color: {COLORS['text_tertiary']}" in window.preview_event_title.styleSheet()
 
     window.close()
+

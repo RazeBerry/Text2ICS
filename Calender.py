@@ -71,10 +71,6 @@ from eventcalendar.config.constants import (
     SUPPORTED_IMAGE_EXTENSIONS,
 )
 
-# For test compatibility - some tests define patterns locally
-TIME_PATTERNS = None  # Placeholder for compatibility
-DATE_PATTERNS = None  # Placeholder for compatibility
-
 __all__ = [
     # datetime for monkeypatching
     'datetime',

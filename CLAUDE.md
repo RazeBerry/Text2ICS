@@ -27,13 +27,19 @@ python Calender.py
 pytest                           # All tests
 pytest test_calender.py          # UI and ICS parsing tests
 pytest test_thread_safety.py     # Thread safety and data model tests
-python test_api_client.py        # Manual API integration test (requires GEMINI_API_KEY)
+python test_api_client.py        # Manual API integration test (requires GEMINI_API_KEY_FREE or GEMINI_API_KEY)
 ```
 
 ### Install Dependencies
 ```bash
+# Recommended (installs runtime deps from pyproject.toml)
+pip install -e .
+
+# For development/tests
+pip install -e ".[dev]"
+
+# Alternative (runtime-only)
 pip install -r requirements.txt
-pip install -e .                 # Editable install for entry points
 ```
 
 ## Package Architecture
@@ -50,9 +56,9 @@ src/eventcalendar/               # Main package (v2.0.0)
 │   ├── event_model.py           # CalendarEvent dataclass
 │   ├── ics_builder.py           # build_ics_from_events(), combine_ics_strings()
 │   ├── retry.py                 # is_retryable_error(), smart retry logic
-│   └── timezone_utils.py        # resolve_timezone(), normalize_tz()
+│   └── timezone_utils.py        # resolve_timezone(), extract_timezone_from_time_string(), attach_timezone_with_warnings()
 ├── storage/
-│   ├── key_manager.py           # get_api_key(), save_api_key()
+│   ├── key_manager.py           # load_api_key(), save_api_key(), migration helpers
 │   ├── keyring_storage.py       # OS secure storage (Keychain/Credential Manager/Secret Service)
 │   └── env_storage.py           # .env file handling
 ├── ui/
@@ -74,7 +80,7 @@ src/eventcalendar/               # Main package (v2.0.0)
 ├── utils/
 │   ├── date_parsing.py          # Date/time extraction regexes
 │   ├── masking.py               # mask_key() for secure logging
-│   └── paths.py                 # get_config_dir(), get_data_dir()
+│   └── paths.py                 # get_resource_path(), get_package_dir(), get_project_root()
 └── exceptions/
     └── errors.py                # CalendarAPIError hierarchy
 ```
@@ -119,17 +125,18 @@ from Calender import NLCalendarCreator
 ## Design System (Anthropic-Inspired)
 
 ### Font Configuration
-All fonts standardized to SF Mono via centralized constant:
+Fonts are centralized via `FONT_FAMILIES`:
 ```python
-from eventcalendar.ui.theme.scales import FONT_FAMILIES, FONT_MONO
-# FONT_FAMILIES = {"sans": "SF Mono...", "serif": "SF Mono...", "mono": "SF Mono..."}
+from eventcalendar.ui.theme.scales import FONT_FAMILIES, FONT_SANS, FONT_SERIF, FONT_MONO
+# macOS defaults:
+# FONT_FAMILIES = {"sans": ".AppleSystemUIFont", "serif": ".AppleSystemUIFont", "mono": "SF Mono"}
 ```
 
 ### Color Access
 Colors are theme-aware and accessed via `get_color()`:
 ```python
 from eventcalendar.ui.theme.colors import get_color
-bg = get_color("background")        # Returns current theme color
+bg = get_color("background_primary")  # Returns current theme color
 accent = get_color("accent")        # Terracotta: #CC5A47 (light), #E07058 (dark)
 ```
 
@@ -137,7 +144,7 @@ accent = get_color("accent")        # Terracotta: #CC5A47 (light), #E07058 (dark
 ```python
 from eventcalendar.ui.theme.scales import SPACING_SCALE, BORDER_RADIUS
 from eventcalendar.ui.styles.base import px
-margin = px(SPACING_SCALE["md"])    # "16px"
+margin = px(SPACING_SCALE["md"])    # "24px"
 radius = px(BORDER_RADIUS["lg"])    # "16px"
 ```
 
@@ -150,11 +157,12 @@ button.setStyleSheet(ButtonStyles.danger())   # Destructive action
 ```
 
 ### Color Palette Keys
-- **Backgrounds**: `background`, `background_secondary`, `background_tertiary`, `surface_elevated`
 - **Text**: `text_primary`, `text_secondary`, `text_tertiary`, `text_placeholder`
-- **Accents**: `accent`, `accent_hover`, `accent_muted`, `glow_accent`
+- **Backgrounds**: `background_primary`, `background_secondary`, `background_tertiary`
+- **Borders**: `border_light`, `border_medium`
+- **Accents**: `accent`, `accent_hover`, `accent_pressed`, `accent_disabled`, `accent_secondary`, `accent_secondary_hover`, `glow_accent`
 - **Status**: `success`, `warning`, `error`
-- **UI**: `border`, `border_subtle`, `divider`
+- **Surfaces/Overlay**: `surface_elevated`, `surface_overlay`, `gradient_start`, `gradient_end`
 
 ## Threading Model
 
@@ -197,10 +205,19 @@ Defined in `eventcalendar.core.retry`:
 
 ## Key Implementation Details
 
-- All fonts standardized to SF Mono via `FONT_FAMILIES` constant in `ui/theme/scales.py`
-- Times are parsed exactly as stated and converted to UTC for ICS storage
+- Fonts are centralized via `FONT_FAMILIES` in `ui/theme/scales.py`
+- Times are parsed exactly as stated and converted to UTC for ICS storage (with DST gap/ambiguity handling)
+- "Time-zone jump" events can provide `start_timezone`/`end_timezone` and optional `end_date` for travel-style events
 - `ABBR_TO_TZ` in `config/constants.py` maps timezone abbreviations (EST, PST, etc.) to IANA zones
 - Multiple images can be attached; they're uploaded to Gemini before the text prompt
 - ICS files use CRLF line endings per RFC5545
 - Event UIDs are regenerated with `@nl-calendar` suffix when combining ICS documents
 - Sensitive data masked before logging via `utils/masking.py`
+
+### Useful Environment Variables
+- `GEMINI_API_KEY_FREE` / `GEMINI_API_KEY` - API key (free-tier var is preferred)
+- `EVENTCALENDAR_UPLOAD_WORKERS` - parallel image upload worker count (default 3)
+- `EVENTCALENDAR_DISABLE_IMAGE_PREPROCESSING` - disable image resizing/optimization (set to `1`/`true`)
+- `EVENTCALENDAR_IMAGE_MAX_EDGE_PX`, `EVENTCALENDAR_IMAGE_JPEG_QUALITY`, `EVENTCALENDAR_IMAGE_MAX_BYTES` - image preprocessing tuning
+- `EVENTCALENDAR_DST_AMBIGUOUS` - `earlier|later|raise` (default `later`)
+- `EVENTCALENDAR_DST_NONEXISTENT` - `shift_forward|raise` (default `shift_forward`)

@@ -90,8 +90,3 @@ def delete_from_keyring() -> bool:
     except Exception as e:
         logger.warning("Keyring delete failed: %s", e)
         return False
-
-
-# Backward compatibility aliases
-_load_from_keyring = load_from_keyring
-_save_to_keyring = save_to_keyring

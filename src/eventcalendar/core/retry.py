@@ -92,7 +92,3 @@ def wrap_api_key_error(error: Exception, masked_key: str) -> CalendarAPIError:
 
     logger.error("API key error (%s): %s", masked_key, error)
     return CalendarAPIError(msg)
-
-
-# Backward compatibility alias
-_is_retryable_error = is_retryable_error

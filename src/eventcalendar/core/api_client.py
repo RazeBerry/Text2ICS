@@ -39,34 +39,42 @@ Follow these steps to extract event details and return them as a JSON array:
    **IMPORTANT TIME HANDLING**:
    - Extract times EXACTLY as mentioned in the input (e.g., "3 PM", "19:30", "7:30pm")
    - Do NOT attempt timezone conversions - preserve the original time as stated
-   - If a timezone is explicitly mentioned, include it in the time string
-   - If no timezone is specified, assume it's in the user's local timezone
+   - If a timezone is explicitly mentioned, put it in a timezone field (see below) and keep the time string timezone-free
+   - If no timezone is specified, assume it's in the user's local timezone ("local")
    - For relative dates like "tomorrow", "next Friday", calculate based on the provided current date
    - If end time is not specified, estimate a reasonable duration (e.g., 1 hour for meetings, 2-3 hours for dinners)
+   - If an event "jumps" time zones (e.g., flights), you MAY provide different start/end timezones (and end_date if needed)
 
 3. Return a **JSON array**, one object per event.
    Keys REQUIRED per event:
      - "uid"          : stable unique string (use UUID if needed, no @domain required)
      - "title"        : human title
-     - "start_time"   : time string as extracted (e.g., "7:30 PM", "19:30", "3:00 PM EST")
+     - "start_time"   : time string as extracted (e.g., "7:30 PM", "19:30")
      - "end_time"     : time string as extracted or estimated (e.g., "9:00 PM", "21:30")
      - "date"         : date string (e.g., "2024-08-15", "March 30, 2024")
      - "timezone"     : timezone if explicitly mentioned, otherwise "local"
      - "description"  : plain text (no special escaping needed)
      - "location"     : plain text address or venue name, or "" if none provided
 
+   Optional keys (use when helpful, especially for travel / time-zone jumps):
+     - "start_timezone": timezone for the start time (IANA like "America/Los_Angeles", an abbreviation like "PDT", or "local")
+     - "end_timezone"  : timezone for the end time (IANA like "America/New_York", an abbreviation like "EDT", or "local")
+     - "end_date"      : end date string if different from "date"
+
    Example JSON Output:
    ```json
    [
      {
        "uid": "uuid-some-unique-id-1",
-       "title": "Dinner with Mia",
-       "start_time": "7:30 PM",
-       "end_time": "9:00 PM",
+       "title": "Flight LA → NYC",
+       "start_time": "10:00 AM",
+       "end_time": "6:00 PM",
        "date": "2024-08-15",
        "timezone": "local",
-       "description": "Catch up dinner.",
-       "location": "Balthasar Restaurant"
+       "start_timezone": "America/Los_Angeles",
+       "end_timezone": "America/New_York",
+       "description": "Depart LAX, arrive JFK.",
+       "location": "LAX → JFK"
      }
    ]
    ```
@@ -233,11 +241,17 @@ Current timezone: {user_timezone}
             event_description = "Event details are provided via attached images."
 
         current_date = datetime.now()
+        try:
+            import tzlocal
+
+            user_timezone = tzlocal.get_localzone_name()
+        except Exception:
+            user_timezone = str(current_date.astimezone().tzinfo)
         return self.USER_PROMPT_TEMPLATE.format(
             event_description=event_description,
             day_name=current_date.strftime("%A"),
             formatted_date=current_date.strftime("%B %d, %Y"),
-            user_timezone=str(current_date.astimezone().tzinfo)
+            user_timezone=user_timezone,
         )
 
     def _prepare_image_history(

@@ -104,9 +104,8 @@ class ButtonStyles:
             }}
         """
 
-    # Aliases for semantic clarity
+    # Alias for semantic clarity (referenced in CLAUDE.md examples)
     ghost = tertiary
-    subtle = tertiary
 
     @staticmethod
     def icon() -> str:

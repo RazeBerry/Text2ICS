@@ -52,6 +52,7 @@ ENV/
 # IDE
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
@@ -63,6 +64,7 @@ ENV/
 htmlcov/
 .tox/
 .nox/
+.ruff_cache/
 
 # Generated files
 *.ics

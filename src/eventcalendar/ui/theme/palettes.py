@@ -30,6 +30,7 @@ LIGHT_PALETTE = {
     "accent_hover": "#B8483A",       # Deeper terracotta
     "accent_pressed": "#A03C2E",     # Rich rust
     "accent_disabled": "#D9CFC6",    # Muted sand
+    "accent_muted": "#D4A093",       # Desaturated terracotta for disabled state
 
     # Accent secondary - warm amber
     "accent_secondary": "#C17F3C",   # Warm amber/gold
@@ -71,6 +72,7 @@ DARK_PALETTE = {
     "accent_hover": "#E88A74",       # Lighter terracotta
     "accent_pressed": "#CC5A47",     # Standard terracotta
     "accent_disabled": "#4A4440",    # Muted dark
+    "accent_muted": "#7A4A3F",       # Desaturated terracotta for disabled state
 
     # Accent secondary
     "accent_secondary": "#D4924A",   # Warm amber

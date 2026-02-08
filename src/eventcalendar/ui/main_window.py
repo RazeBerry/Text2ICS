@@ -24,7 +24,7 @@ from PyQt6.QtGui import QCloseEvent, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QLabel, QMessageBox, QSizePolicy, QFrame,
-    QGraphicsOpacityEffect, QScrollArea
+    QGraphicsOpacityEffect
 )
 
 from eventcalendar.config.settings import UI_CONFIG
@@ -106,7 +106,7 @@ class NLCalendarCreator(QMainWindow):
         """Initialize the main window."""
         super().__init__()
 
-        # Set app-wide Geist font (Qt stylesheets don't work for font-family on macOS)
+        # Set app-wide default font (Qt stylesheets don't reliably set font-family on macOS)
         set_app_font(QApplication.instance(), "sans", 14)
 
         self._init_window_properties()
@@ -494,78 +494,11 @@ class NLCalendarCreator(QMainWindow):
         breath_duration = 1200  # ms for one breath cycle (slower than wave)
 
         for i, (dot, opacity) in enumerate(zip(self._wave_dots, self._dot_opacities)):
-            # Phase delay: stagger each dot by 1/3 of the cycle
             phase_delay = i * (wave_duration // 3)
-
-            # === WAVE ANIMATION (position) ===
-            wave_seq = QSequentialAnimationGroup()
-
-            # Move up
-            up_anim = QPropertyAnimation(dot, b"offset")
-            up_anim.setDuration(wave_duration // 2)
-            up_anim.setStartValue(0.0)
-            up_anim.setEndValue(-wave_height)
-            up_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-
-            # Move down
-            down_anim = QPropertyAnimation(dot, b"offset")
-            down_anim.setDuration(wave_duration // 2)
-            down_anim.setStartValue(-wave_height)
-            down_anim.setEndValue(0.0)
-            down_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-
-            wave_seq.addAnimation(up_anim)
-            wave_seq.addAnimation(down_anim)
-            wave_seq.setLoopCount(-1)
-
-            # === BREATHING ANIMATION (opacity) ===
-            breath_seq = QSequentialAnimationGroup()
-
-            # Fade out
-            fade_out = QPropertyAnimation(opacity, b"opacity")
-            fade_out.setDuration(breath_duration // 2)
-            fade_out.setStartValue(1.0)
-            fade_out.setEndValue(0.4)
-            fade_out.setEasingCurve(QEasingCurve.Type.InOutSine)
-
-            # Fade in
-            fade_in = QPropertyAnimation(opacity, b"opacity")
-            fade_in.setDuration(breath_duration // 2)
-            fade_in.setStartValue(0.4)
-            fade_in.setEndValue(1.0)
-            fade_in.setEasingCurve(QEasingCurve.Type.InOutSine)
-
-            breath_seq.addAnimation(fade_out)
-            breath_seq.addAnimation(fade_in)
-            breath_seq.setLoopCount(-1)
-
-            # Combine wave + breathing for this dot (both run in parallel)
-            dot_animations = QParallelAnimationGroup()
-
-            # Wave with phase offset
-            wave_wrapper = QSequentialAnimationGroup()
-            if phase_delay > 0:
-                pause = QPropertyAnimation(dot, b"offset")
-                pause.setDuration(phase_delay)
-                pause.setStartValue(0.0)
-                pause.setEndValue(0.0)
-                wave_wrapper.addAnimation(pause)
-            wave_wrapper.addAnimation(wave_seq)
-
-            # Breathing with same phase offset (synchronized with wave)
-            breath_wrapper = QSequentialAnimationGroup()
-            if phase_delay > 0:
-                breath_pause = QPropertyAnimation(opacity, b"opacity")
-                breath_pause.setDuration(phase_delay)
-                breath_pause.setStartValue(1.0)
-                breath_pause.setEndValue(1.0)
-                breath_wrapper.addAnimation(breath_pause)
-            breath_wrapper.addAnimation(breath_seq)
-
-            dot_animations.addAnimation(wave_wrapper)
-            dot_animations.addAnimation(breath_wrapper)
-
-            self._wave_animation.addAnimation(dot_animations)
+            dot_group = self._create_dot_animations(
+                dot, opacity, phase_delay, wave_height, wave_duration, breath_duration
+            )
+            self._wave_animation.addAnimation(dot_group)
 
         self.processing_label = QLabel("Processing...")
         headline_style = TYPOGRAPHY_SCALE["headline"]
@@ -581,6 +514,73 @@ class NLCalendarCreator(QMainWindow):
         card_layout.addWidget(self.processing_label)
 
         overlay_layout.addWidget(processing_card)
+
+    def _create_dot_animations(
+        self, dot: WaveDot, opacity: QGraphicsOpacityEffect,
+        phase_delay: int, wave_height: float,
+        wave_duration: int, breath_duration: int,
+    ) -> QParallelAnimationGroup:
+        """Build parallel wave + breathing animations for a single dot.
+
+        Returns a QParallelAnimationGroup containing phase-delayed wave
+        (vertical offset) and breathing (opacity) animation sequences.
+        """
+        # Wave animation (position)
+        wave_seq = QSequentialAnimationGroup()
+        up_anim = QPropertyAnimation(dot, b"offset")
+        up_anim.setDuration(wave_duration // 2)
+        up_anim.setStartValue(0.0)
+        up_anim.setEndValue(-wave_height)
+        up_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        down_anim = QPropertyAnimation(dot, b"offset")
+        down_anim.setDuration(wave_duration // 2)
+        down_anim.setStartValue(-wave_height)
+        down_anim.setEndValue(0.0)
+        down_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        wave_seq.addAnimation(up_anim)
+        wave_seq.addAnimation(down_anim)
+        wave_seq.setLoopCount(-1)
+
+        # Breathing animation (opacity)
+        breath_seq = QSequentialAnimationGroup()
+        fade_out = QPropertyAnimation(opacity, b"opacity")
+        fade_out.setDuration(breath_duration // 2)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.4)
+        fade_out.setEasingCurve(QEasingCurve.Type.InOutSine)
+        fade_in = QPropertyAnimation(opacity, b"opacity")
+        fade_in.setDuration(breath_duration // 2)
+        fade_in.setStartValue(0.4)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.Type.InOutSine)
+        breath_seq.addAnimation(fade_out)
+        breath_seq.addAnimation(fade_in)
+        breath_seq.setLoopCount(-1)
+
+        # Combine with phase offset
+        dot_group = QParallelAnimationGroup()
+
+        wave_wrapper = QSequentialAnimationGroup()
+        if phase_delay > 0:
+            pause = QPropertyAnimation(dot, b"offset")
+            pause.setDuration(phase_delay)
+            pause.setStartValue(0.0)
+            pause.setEndValue(0.0)
+            wave_wrapper.addAnimation(pause)
+        wave_wrapper.addAnimation(wave_seq)
+
+        breath_wrapper = QSequentialAnimationGroup()
+        if phase_delay > 0:
+            breath_pause = QPropertyAnimation(opacity, b"opacity")
+            breath_pause.setDuration(phase_delay)
+            breath_pause.setStartValue(1.0)
+            breath_pause.setEndValue(1.0)
+            breath_wrapper.addAnimation(breath_pause)
+        breath_wrapper.addAnimation(breath_seq)
+
+        dot_group.addAnimation(wave_wrapper)
+        dot_group.addAnimation(breath_wrapper)
+        return dot_group
 
     def _setup_preview_timer(self) -> None:
         """Set up the debounced preview timer."""

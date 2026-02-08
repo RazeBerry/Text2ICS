@@ -13,13 +13,16 @@ from icalendar import Calendar, Event, vText, Alarm
 
 from eventcalendar.config.constants import (
     ICS_PRODID,
+    ICS_VERSION,
+    ICS_CALSCALE,
     DEFAULT_REMINDER_MINUTES,
     DEFAULT_EVENT_TITLE,
 )
 from eventcalendar.core.timezone_utils import (
     normalize_time_string,
     resolve_timezone,
-    attach_timezone,
+    attach_timezone_with_warnings,
+    extract_timezone_from_time_string,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,16 +159,37 @@ def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
         Exception: If date/time parsing fails.
     """
     try:
+        warnings: List[str] = []
+
         # Parse the date first
         event_date = parser.parse(event_dict["date"]).date()
+        end_date_raw = event_dict.get("end_date") or event_dict.get("date")
+        end_date = parser.parse(end_date_raw).date()
 
         # Parse start and end times
-        start_time_str = normalize_time_string(event_dict["start_time"])
-        end_time_str = normalize_time_string(event_dict["end_time"])
+        start_time_str_raw = normalize_time_string(event_dict["start_time"])
+        end_time_str_raw = normalize_time_string(event_dict["end_time"])
 
-        # Handle timezone
-        tz_str = event_dict.get("timezone", "local") or "local"
-        local_tz, warning = resolve_timezone(tz_str, event_dict.get('title'))
+        base_tz_str = event_dict.get("timezone", "local") or "local"
+        start_tz_str = event_dict.get("start_timezone") or base_tz_str
+        end_tz_str = event_dict.get("end_timezone") or start_tz_str
+
+        # If the LLM embedded timezone in time strings, prefer that.
+        start_time_str, start_tz_from_time = extract_timezone_from_time_string(start_time_str_raw)
+        end_time_str, end_tz_from_time = extract_timezone_from_time_string(end_time_str_raw)
+        if start_tz_from_time:
+            start_tz_str = start_tz_from_time
+        if end_tz_from_time:
+            end_tz_str = end_tz_from_time
+
+        # Resolve start/end timezones separately (supports travel "timezone jumps")
+        event_title = event_dict.get("title")
+        start_tz, start_tz_warning = resolve_timezone(str(start_tz_str), event_title)
+        end_tz, end_tz_warning = resolve_timezone(str(end_tz_str), event_title)
+        if start_tz_warning:
+            warnings.append(f"Start time: {start_tz_warning}")
+        if end_tz_warning and end_tz_warning != start_tz_warning:
+            warnings.append(f"End time: {end_tz_warning}")
 
         # Parse times and combine with date
         start_time = parser.parse(start_time_str).time()
@@ -173,20 +197,83 @@ def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
 
         # Combine date and time (still naive at this point)
         start_dt_naive = datetime.combine(event_date, start_time)
-        end_dt_naive = datetime.combine(event_date, end_time)
+        end_dt_naive = datetime.combine(end_date, end_time)
 
         # Attach timezone
-        start_dt = attach_timezone(local_tz, start_dt_naive)
-        end_dt = attach_timezone(local_tz, end_dt_naive)
+        start_dt, start_dst_warning = attach_timezone_with_warnings(start_tz, start_dt_naive)
+        end_dt, end_dst_warning = attach_timezone_with_warnings(end_tz, end_dt_naive)
+        if start_dst_warning:
+            warnings.append(f"Start time: {start_dst_warning}")
+        if end_dst_warning:
+            warnings.append(f"End time: {end_dst_warning}")
 
         # Convert to UTC for storage
         start_dt_utc = start_dt.astimezone(pytz.utc)
         end_dt_utc = end_dt.astimezone(pytz.utc)
 
+        # If end time is not after start, assume it crosses midnight (or the end date was omitted).
+        if end_dt_utc <= start_dt_utc:
+            explicit_end_date = "end_date" in event_dict and bool(event_dict.get("end_date"))
+            if explicit_end_date:
+                raise ValueError(
+                    f"End time ({end_dt_utc.isoformat()}) is not after start time "
+                    f"({start_dt_utc.isoformat()}) after timezone conversion."
+                )
+
+            def tz_key(tzobj) -> str:
+                return str(getattr(tzobj, "zone", getattr(tzobj, "key", str(tzobj))))
+
+            # DST edge cases can make an end time appear to be <= start time even when the
+            # user provided a positive wall-time duration (e.g. 02:30–03:30 on spring-forward).
+            # In that case, preserve the naive duration rather than rolling the end date.
+            naive_duration = end_dt_naive - start_dt_naive
+            if naive_duration > timedelta(0) and tz_key(start_tz) == tz_key(end_tz):
+                candidate_end_dt = start_dt + naive_duration
+                if hasattr(end_tz, "normalize"):
+                    candidate_end_dt = end_tz.normalize(candidate_end_dt)
+                candidate_end_utc = candidate_end_dt.astimezone(pytz.utc)
+                if candidate_end_utc > start_dt_utc:
+                    end_dt = candidate_end_dt
+                    end_dt_utc = candidate_end_utc
+                    warnings.append(
+                        "End time was not after start after DST/timezone resolution; "
+                        "preserved the original duration instead of rolling the end date."
+                    )
+                else:
+                    # Fall back to rolling the end date.
+                    pass
+
+            if end_dt_utc <= start_dt_utc:
+                adjusted = False
+                for days in (1, 2):
+                    candidate_end_naive = end_dt_naive + timedelta(days=days)
+                    candidate_end_dt, candidate_dst_warning = attach_timezone_with_warnings(
+                        end_tz,
+                        candidate_end_naive,
+                    )
+                    candidate_end_utc = candidate_end_dt.astimezone(pytz.utc)
+                    if candidate_end_utc > start_dt_utc:
+                        end_dt = candidate_end_dt
+                        end_dt_utc = candidate_end_utc
+                        adjusted = True
+                        warnings.append(
+                            "End time occurred before start after timezone conversion; "
+                            f"assumed the end date is {candidate_end_naive.date().isoformat()}."
+                        )
+                        if candidate_dst_warning:
+                            warnings.append(f"End time: {candidate_dst_warning}")
+                        break
+
+                if not adjusted:
+                    raise ValueError(
+                        f"End time ({end_dt_utc.isoformat()}) is not after start time "
+                        f"({start_dt_utc.isoformat()}) after timezone conversion."
+                    )
+
         return DateTimeResult(
             start_utc=start_dt_utc,
             end_utc=end_dt_utc,
-            warning=warning
+            warning="\n".join(warnings) if warnings else None,
         )
     except Exception as dt_err:
         event_title = event_dict.get('title', 'Unknown')
@@ -205,7 +292,8 @@ def _create_ics_calendar() -> Calendar:
     """
     cal = Calendar()
     cal.add("PRODID", ICS_PRODID)
-    cal.add("VERSION", "2.0")
+    cal.add("VERSION", ICS_VERSION)
+    cal.add("CALSCALE", ICS_CALSCALE)
     return cal
 
 
@@ -346,9 +434,9 @@ def _create_merged_calendar(calendars: List[Calendar]) -> Calendar:
     if merged_calendar.get("PRODID") is None:
         merged_calendar.add("PRODID", ICS_PRODID)
     if merged_calendar.get("VERSION") is None:
-        merged_calendar.add("VERSION", "2.0")
+        merged_calendar.add("VERSION", ICS_VERSION)
     if merged_calendar.get("CALSCALE") is None:
-        merged_calendar.add("CALSCALE", "GREGORIAN")
+        merged_calendar.add("CALSCALE", ICS_CALSCALE)
 
     return merged_calendar
 

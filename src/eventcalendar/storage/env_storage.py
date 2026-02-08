@@ -69,32 +69,29 @@ def get_executable_dir_env_path() -> Path:
         return get_legacy_env_path()
 
 
-def harden_file_permissions(path: Path) -> None:
+def _harden_permissions(path: Path, mode: int) -> None:
     """Best-effort: restrict permissions to the current user on POSIX.
 
     Args:
-        path: Path to the file to secure.
+        path: Path to the file or directory to secure.
+        mode: Octal permission mode (e.g. 0o600 for files, 0o700 for dirs).
     """
     if os.name != "posix":
         return
     try:
-        path.chmod(0o600)
+        path.chmod(mode)
     except Exception as e:
         logger.warning("Could not tighten permissions on %s: %s", path, e)
+
+
+def harden_file_permissions(path: Path) -> None:
+    """Best-effort: restrict file permissions to the current user on POSIX."""
+    _harden_permissions(path, 0o600)
 
 
 def harden_directory_permissions(path: Path) -> None:
-    """Best-effort: restrict directory permissions to the current user on POSIX.
-
-    Args:
-        path: Path to the directory to secure.
-    """
-    if os.name != "posix":
-        return
-    try:
-        path.chmod(0o700)
-    except Exception as e:
-        logger.warning("Could not tighten permissions on %s: %s", path, e)
+    """Best-effort: restrict directory permissions to the current user on POSIX."""
+    _harden_permissions(path, 0o700)
 
 
 def load_from_env_file(path: Path) -> Optional[str]:
@@ -143,13 +140,3 @@ def store_in_env_file(api_key: str) -> None:
     # Write both variable names for clarity; free-tier key is preferred
     set_key(str(env_path), PREFERRED_ENV_VAR, api_key)
     set_key(str(env_path), PRIMARY_ENV_VAR, api_key)
-
-    if env_path.exists():
-        harden_file_permissions(env_path)
-
-
-# Backward compatibility aliases
-_harden_file_permissions = harden_file_permissions
-_harden_directory_permissions = harden_directory_permissions
-_load_from_env_file = load_from_env_file
-_store_in_env_file = store_in_env_file

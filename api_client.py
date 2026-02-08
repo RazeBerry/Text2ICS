@@ -27,15 +27,15 @@ warnings.warn(
 from eventcalendar.core.api_client import CalendarAPIClient
 from eventcalendar.core.ics_builder import build_ics_from_events
 from eventcalendar.core.event_model import CalendarEvent
-from eventcalendar.core.retry import is_retryable_error as _is_retryable_error
+from eventcalendar.core.retry import is_retryable_error
 
 # Re-export utilities
-from eventcalendar.utils.masking import mask_key as _mask_key
+from eventcalendar.utils.masking import mask_key
 
 __all__ = [
     'CalendarAPIClient',
     'build_ics_from_events',
     'CalendarEvent',
-    '_is_retryable_error',
-    '_mask_key',
+    'is_retryable_error',
+    'mask_key',
 ]

@@ -24,8 +24,8 @@ A PyQt6-based desktop application that lets you create calendar events using nat
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/username/EventCalenderGenerator
-cd EventCalenderGenerator
+git clone https://github.com/RazeBerry/Calender2ICS.git
+cd Calender2ICS
 ```
 
 2. Create and activate a virtual environment (recommended):
@@ -41,7 +41,14 @@ python -m venv venv
 
 3. Install required packages:
 ```bash
-pip install PyQt6 google-generativeai
+# Recommended (installs runtime deps from pyproject.toml)
+pip install -e .
+
+# For development/tests
+pip install -e ".[dev]"
+
+# Alternative (runtime-only)
+pip install -r requirements.txt
 ```
 
 ## Setting Up the Gemini API Key
@@ -69,6 +76,8 @@ Your key will be stored in your **OS secure credential storage** (macOS Keychain
 #### macOS/Linux:
 ```bash
 # Add to ~/.bashrc, ~/.zshrc, or equivalent
+export GEMINI_API_KEY_FREE='your-api-key-here'  # preferred
+# or
 export GEMINI_API_KEY='your-api-key-here'
 ```
 Then restart your terminal or run:
@@ -78,12 +87,16 @@ source ~/.bashrc  # or ~/.zshrc
 
 #### Windows (Command Prompt):
 ```cmd
+setx GEMINI_API_KEY_FREE "your-api-key-here"
+REM or
 setx GEMINI_API_KEY "your-api-key-here"
 ```
 Then restart your command prompt.
 
 #### Windows (PowerShell):
 ```powershell
+[Environment]::SetEnvironmentVariable("GEMINI_API_KEY_FREE", "your-api-key-here", "User")
+# or
 [Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "your-api-key-here", "User")
 ```
 Then restart PowerShell.
@@ -104,6 +117,11 @@ The app automatically sets secure permissions (0o600 - owner-only access) on thi
 1. Activate your virtual environment (if using one)
 2. Run the application:
 ```bash
+python -m eventcalendar
+# or (after pip install -e .)
+eventcalendar-gui
+
+# Legacy (deprecated, emits warning)
 python Calender.py
 ```
 3. On first launch, you'll be prompted to enter your API key - it will be securely stored
@@ -127,11 +145,8 @@ This will test the basic functionality of the API client with a simple example.
 
 ## Project Structure
 
-The project is organized as follows:
-
-- `Calender.py` - Main application with UI components and event handling
-- `api_client.py` - Separated API interaction module for better modularity
-- `test_api_client.py` - Testing script for the API client
+The app lives in `src/eventcalendar/`. Root-level files like `Calender.py` and
+`api_client.py` are backward-compatibility shims and emit `DeprecationWarning`.
 
 ## Usage
 
@@ -149,7 +164,7 @@ The project is organized as follows:
 
    ### Photo Input
    - Simply drag & drop event flyers, screenshots, or photos into the attachment area
-   - Supports multiple image formats (.png, .jpg, .jpeg, .gif)
+   - Supports multiple image formats (.png, .jpg, .jpeg, .gif, .webp, .bmp)
    - The app will analyze the images and extract event details automatically
    - Perfect for conference schedules, event posters, or meeting invitations
    - Combine with text input for additional details or modifications

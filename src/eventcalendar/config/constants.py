@@ -71,12 +71,16 @@ ABBR_TO_TZ = {
     # North America
     "EST": "America/New_York",
     "EDT": "America/New_York",
+    "ET": "America/New_York",
     "CST": "America/Chicago",
     "CDT": "America/Chicago",
+    "CT": "America/Chicago",
     "MST": "America/Denver",
     "MDT": "America/Denver",
+    "MT": "America/Denver",
     "PST": "America/Los_Angeles",
     "PDT": "America/Los_Angeles",
+    "PT": "America/Los_Angeles",
     # United Kingdom / Europe
     "GMT": "Europe/London",
     "BST": "Europe/London",

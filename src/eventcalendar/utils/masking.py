@@ -17,7 +17,3 @@ def mask_key(key: Optional[str]) -> str:
     if len(key) <= 8:
         return "***"
     return f"{key[:4]}...{key[-4:]}"
-
-
-# Backward compatibility alias
-_mask_key = mask_key

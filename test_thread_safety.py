@@ -3,14 +3,25 @@
 These tests verify that critical thread safety fixes are working correctly.
 """
 
+import os
+import sys
 import threading
 import time
 import unittest
-from unittest.mock import Mock, patch, MagicMock
 from concurrent.futures import ThreadPoolExecutor, wait
+from unittest.mock import Mock, patch, MagicMock
 
-# Test the ThemeManager class
-from Calender import ThemeManager
+# Ensure local imports work without requiring an editable install.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+
+from eventcalendar.core.event_model import CalendarEvent
+from eventcalendar.core.retry import is_retryable_error
+from eventcalendar.exceptions.errors import (
+    EventValidationError,
+    RetryExhaustedError,
+    TimezoneResolutionError,
+)
+from eventcalendar.ui.theme.manager import ThemeManager
 
 
 class TestThemeManagerThreadSafety(unittest.TestCase):
@@ -86,8 +97,6 @@ class TestRetryLogic(unittest.TestCase):
 
     def test_retryable_error_patterns(self):
         """Verify retryable errors are correctly identified."""
-        from api_client import _is_retryable_error
-
         # These should be retryable
         retryable_errors = [
             Exception("Connection timeout"),
@@ -98,14 +107,12 @@ class TestRetryLogic(unittest.TestCase):
         ]
         for error in retryable_errors:
             self.assertTrue(
-                _is_retryable_error(error),
+                is_retryable_error(error),
                 f"Expected {error} to be retryable"
             )
 
     def test_non_retryable_error_patterns(self):
         """Verify non-retryable errors are correctly identified."""
-        from api_client import _is_retryable_error
-
         # These should NOT be retryable
         non_retryable_errors = [
             Exception("Invalid API key"),
@@ -116,7 +123,7 @@ class TestRetryLogic(unittest.TestCase):
         ]
         for error in non_retryable_errors:
             self.assertFalse(
-                _is_retryable_error(error),
+                is_retryable_error(error),
                 f"Expected {error} to NOT be retryable"
             )
 
@@ -126,8 +133,6 @@ class TestCalendarEventModel(unittest.TestCase):
 
     def test_from_dict_valid_data(self):
         """Verify CalendarEvent can be created from valid dict."""
-        from api_client import CalendarEvent
-
         data = {
             "uid": "test-123",
             "title": "Test Event",
@@ -151,9 +156,6 @@ class TestCalendarEventModel(unittest.TestCase):
 
     def test_from_dict_missing_fields(self):
         """Verify CalendarEvent raises EventValidationError for missing fields."""
-        from api_client import CalendarEvent
-        from exceptions import EventValidationError
-
         data = {
             "title": "Test Event",
             # Missing: uid, start_time, end_time, date, timezone
@@ -167,8 +169,6 @@ class TestCalendarEventModel(unittest.TestCase):
 
     def test_from_dict_generates_uid_if_empty(self):
         """Verify empty UID is replaced with generated UUID."""
-        from api_client import CalendarEvent
-
         data = {
             "uid": "",  # Empty string
             "title": "Test Event",
@@ -186,8 +186,6 @@ class TestCalendarEventModel(unittest.TestCase):
 
     def test_to_dict_roundtrip(self):
         """Verify to_dict produces data that can recreate the event."""
-        from api_client import CalendarEvent
-
         original = CalendarEvent(
             uid="test-123",
             title="Test Event",
@@ -213,8 +211,6 @@ class TestCustomExceptions(unittest.TestCase):
 
     def test_timezone_resolution_error(self):
         """Verify TimezoneResolutionError stores timezone info."""
-        from exceptions import TimezoneResolutionError
-
         error = TimezoneResolutionError("XYZ", "UTC")
         self.assertEqual(error.tz_name, "XYZ")
         self.assertEqual(error.fallback, "UTC")
@@ -223,8 +219,6 @@ class TestCustomExceptions(unittest.TestCase):
 
     def test_event_validation_error(self):
         """Verify EventValidationError stores field info."""
-        from exceptions import EventValidationError
-
         error = EventValidationError({"uid", "date"}, "My Event")
         self.assertEqual(error.missing_fields, {"uid", "date"})
         self.assertEqual(error.event_title, "My Event")
@@ -233,8 +227,6 @@ class TestCustomExceptions(unittest.TestCase):
 
     def test_retry_exhausted_error(self):
         """Verify RetryExhaustedError stores attempt info."""
-        from exceptions import RetryExhaustedError
-
         original_error = ValueError("API failed")
         error = RetryExhaustedError(attempts=5, last_error=original_error)
         self.assertEqual(error.attempts, 5)

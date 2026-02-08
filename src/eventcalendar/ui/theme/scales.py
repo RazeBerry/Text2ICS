@@ -59,7 +59,7 @@ def get_font(family: str = "sans", size: int = 14, weight: int = 400) -> "QFont"
 def set_app_font(app: "QApplication", family: str = "sans", size: int = 14) -> None:
     """Set the application-wide default font.
 
-    Call this once at app startup to set Geist as the default font.
+    Call this once at app startup to set the default application font.
 
     Args:
         app: The QApplication instance
@@ -164,22 +164,4 @@ BORDER_RADIUS = {
     "lg": 16,
     "xl": 24,
     "full": 9999,  # For pills and circles
-}
-
-# Shadow Scale - warm-tinted shadows for depth
-SHADOW_SCALE = {
-    "sm": "0 1px 2px rgba(45, 41, 38, 0.05)",
-    "md": "0 4px 12px rgba(45, 41, 38, 0.08)",
-    "lg": "0 8px 24px rgba(45, 41, 38, 0.12)",
-    "xl": "0 16px 48px rgba(45, 41, 38, 0.16)",
-    "inner": "inset 0 1px 2px rgba(45, 41, 38, 0.06)",
-    "glow": "0 0 24px rgba(204, 90, 71, 0.2)",  # Terracotta glow
-}
-
-# Transition durations
-TRANSITIONS = {
-    "fast": "120ms",
-    "normal": "200ms",
-    "slow": "350ms",
-    "spring": "400ms cubic-bezier(0.34, 1.56, 0.64, 1)",
 }

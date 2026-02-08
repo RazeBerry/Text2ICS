@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 import os
 import sys
-from api_client import CalendarAPIClient
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+
+from eventcalendar.core.api_client import CalendarAPIClient
 
 def main():
     """Simple test function to verify that the API client works correctly."""
     print("Testing CalendarAPIClient...")
     
     # Check for API key
-    api_key = os.environ.get('GEMINI_API_KEY')
+    api_key = os.environ.get('GEMINI_API_KEY_FREE') or os.environ.get('GEMINI_API_KEY')
     if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not set.")
-        print("Please set it before running this test.")
+        print("Error: GEMINI_API_KEY_FREE or GEMINI_API_KEY environment variable not set.")
+        print("Please set one of them before running this test.")
         sys.exit(1)
     
     # Initialize the client
