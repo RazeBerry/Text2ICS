@@ -19,7 +19,7 @@ from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import Qt, pyqtSignal, QByteArray
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
-from PyQt6.QtWidgets import QLabel, QVBoxLayout, QFrame
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QFrame, QFileDialog
 
 from eventcalendar.config.constants import SUPPORTED_IMAGE_EXTENSIONS
 from eventcalendar.ui.theme.colors import get_color
@@ -71,6 +71,7 @@ class ImageAttachmentArea(QFrame):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setMinimumHeight(SPACING_SCALE["xxl"] * 2)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.image_data: List[ImageAttachmentPayload] = []
         self._temp_paths: set = set()
         self._known_sources: set = set()
@@ -118,7 +119,7 @@ class ImageAttachmentArea(QFrame):
         layout.addWidget(self.icon_label)
 
         # Primary text - explicit sans-serif to match input placeholder
-        self.primary_label = QLabel("Drop image here")
+        self.primary_label = QLabel("Drop image here or click to browse")
         self.primary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.primary_label.setWordWrap(True)
         self.primary_label.setStyleSheet(f"""
@@ -144,6 +145,10 @@ class ImageAttachmentArea(QFrame):
             }}
         """)
         layout.addWidget(self.secondary_label)
+
+        # Route clicks on labels to the parent frame for click-to-browse.
+        for label in (self.section_label, self.icon_label, self.primary_label, self.secondary_label):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         # Bottom spacer
         layout.addStretch(1)
@@ -221,7 +226,7 @@ class ImageAttachmentArea(QFrame):
                 color: {get_color('border_medium')};
             }}
         """)
-        self.primary_label.setText("Drop image here")
+        self.primary_label.setText("Drop image here or click to browse")
         self.primary_label.setStyleSheet(f"""
             QLabel {{
                 font-family: {FONT_SANS};
@@ -332,11 +337,7 @@ class ImageAttachmentArea(QFrame):
         mime = event.mimeData()
         images = self._process_dropped_content(mime)
 
-        if images:
-            self.image_data.extend(images)
-            self.setStyleSheet(self._get_active_style())
-            self._update_active_state()
-            self.images_changed.emit(True)
+        if self._add_images(images):
             event.acceptProposedAction()
         else:
             if self.image_data:
@@ -344,6 +345,47 @@ class ImageAttachmentArea(QFrame):
             else:
                 self.setStyleSheet(self._get_base_style())
             event.ignore()
+
+    def mousePressEvent(self, event) -> None:
+        """Open file picker on left-click for click-to-browse behavior."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._select_images_from_dialog()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _select_images_from_dialog(self) -> None:
+        """Select image files from a native file picker."""
+        parent = self.window() if self.window() is not None else self
+        extension_list = sorted(SUPPORTED_IMAGE_EXTENSIONS)
+        file_filter = f"Images ({' '.join(f'*{ext}' for ext in extension_list)})"
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            parent,
+            "Select Images",
+            "",
+            file_filter,
+        )
+        if not file_paths:
+            return
+
+        images = []
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            payload = self._create_payload_from_url(Path(file_path))
+            if payload:
+                images.append(payload)
+        self._add_images(images)
+
+    def _add_images(self, images: List[ImageAttachmentPayload]) -> bool:
+        """Add processed image payloads and refresh widget state."""
+        if not images:
+            return False
+        self.image_data.extend(images)
+        self.setStyleSheet(self._get_active_style())
+        self._update_active_state()
+        self.images_changed.emit(True)
+        return True
 
     def _process_dropped_content(self, mime) -> List[ImageAttachmentPayload]:
         """Extract images from dropped content.
@@ -384,16 +426,16 @@ class ImageAttachmentArea(QFrame):
                 images.append(payload)
         return images
 
-    def _create_payload_from_url(self, url) -> Optional[ImageAttachmentPayload]:
-        """Create image payload from file URL.
+    def _create_payload_from_url(self, source) -> Optional[ImageAttachmentPayload]:
+        """Create image payload from file URL or local path.
 
         Args:
-            url: QUrl for the file.
+            source: QUrl for the file or path-like object.
 
         Returns:
             ImageAttachmentPayload or None.
         """
-        file_path = url.toLocalFile()
+        file_path = source.toLocalFile() if hasattr(source, "toLocalFile") else str(source)
         if not self._is_supported_image(file_path):
             return None
         if not os.path.exists(file_path):
@@ -504,15 +546,6 @@ class ImageAttachmentArea(QFrame):
         buffer.close()
 
         return temp_path
-
-    def update_preview(self) -> None:
-        """Update the preview based on attached images."""
-        if not self.image_data:
-            self.reset_state()
-            return
-
-        self.setStyleSheet(self._get_active_style())
-        self._update_active_state()
 
     def _is_supported_image(self, file_path: str) -> bool:
         """Check if the file is a supported image format.

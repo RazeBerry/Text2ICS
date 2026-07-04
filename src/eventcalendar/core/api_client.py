@@ -37,21 +37,26 @@ Follow these steps to extract event details and return them as a JSON array:
 2. For each event, extract all relevant information such as event title, date, time, location, and description.
 
    **IMPORTANT TIME HANDLING**:
-   - Extract times EXACTLY as mentioned in the input (e.g., "3 PM", "19:30", "7:30pm")
-   - Do NOT attempt timezone conversions - preserve the original time as stated
-   - If a timezone is explicitly mentioned, put it in a timezone field (see below) and keep the time string timezone-free
+   - "start_time" and "end_time" MUST each contain a SINGLE clock time (e.g., "3 PM", "19:30"), NEVER a range. If the input says "7-9pm", set start_time to "7:00 PM" and end_time to "9:00 PM".
+   - Keep time strings free of timezone and date information - timezone info belongs in the timezone fields (see below)
+   - Do NOT attempt timezone conversions - preserve the original wall-clock time as stated
    - If no timezone is specified, assume it's in the user's local timezone ("local")
-   - For relative dates like "tomorrow", "next Friday", calculate based on the provided current date
    - If end time is not specified, estimate a reasonable duration (e.g., 1 hour for meetings, 2-3 hours for dinners)
+   - For all-day events with no times given, use start_time "12:00 AM" and end_time "11:59 PM"
    - If an event "jumps" time zones (e.g., flights), you MAY provide different start/end timezones (and end_date if needed)
+
+   **IMPORTANT DATE HANDLING**:
+   - "date" and "end_date" MUST be in ISO format: YYYY-MM-DD
+   - For relative dates like "tomorrow", "next Friday", calculate based on the provided current date
+   - If a date has no year (e.g., a flyer saying "March 30"), use the next FUTURE occurrence relative to the provided current date
 
 3. Return a **JSON array**, one object per event.
    Keys REQUIRED per event:
      - "uid"          : stable unique string (use UUID if needed, no @domain required)
      - "title"        : human title
-     - "start_time"   : time string as extracted (e.g., "7:30 PM", "19:30")
-     - "end_time"     : time string as extracted or estimated (e.g., "9:00 PM", "21:30")
-     - "date"         : date string (e.g., "2024-08-15", "March 30, 2024")
+     - "start_time"   : single time string (e.g., "7:30 PM", "19:30")
+     - "end_time"     : single time string, extracted or estimated (e.g., "9:00 PM", "21:30")
+     - "date"         : ISO date string (e.g., "2026-08-15")
      - "timezone"     : timezone if explicitly mentioned, otherwise "local"
      - "description"  : plain text (no special escaping needed)
      - "location"     : plain text address or venue name, or "" if none provided
@@ -59,7 +64,7 @@ Follow these steps to extract event details and return them as a JSON array:
    Optional keys (use when helpful, especially for travel / time-zone jumps):
      - "start_timezone": timezone for the start time (IANA like "America/Los_Angeles", an abbreviation like "PDT", or "local")
      - "end_timezone"  : timezone for the end time (IANA like "America/New_York", an abbreviation like "EDT", or "local")
-     - "end_date"      : end date string if different from "date"
+     - "end_date"      : ISO end date (YYYY-MM-DD) if different from "date"
 
    Example JSON Output:
    ```json
@@ -69,7 +74,7 @@ Follow these steps to extract event details and return them as a JSON array:
        "title": "Flight LA → NYC",
        "start_time": "10:00 AM",
        "end_time": "6:00 PM",
-       "date": "2024-08-15",
+       "date": "2026-08-15",
        "timezone": "local",
        "start_timezone": "America/Los_Angeles",
        "end_timezone": "America/New_York",

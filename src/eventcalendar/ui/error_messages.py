@@ -52,18 +52,3 @@ def get_user_friendly_error(error: Exception) -> str:
     # Default message
     return f"An error occurred: {str(error)}"
 
-
-def format_error_for_status(error: Exception) -> str:
-    """Format an error for display in the status bar.
-
-    Args:
-        error: The exception to format.
-
-    Returns:
-        A short status message.
-    """
-    friendly = get_user_friendly_error(error)
-    # Truncate for status bar
-    if len(friendly) > 100:
-        return friendly[:97] + "..."
-    return friendly

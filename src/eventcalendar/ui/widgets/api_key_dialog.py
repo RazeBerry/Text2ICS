@@ -387,11 +387,3 @@ class APIKeySetupDialog(QDialog):
                 "Failed to save API key. Please try again.",
                 "error"
             )
-
-    def get_api_key(self) -> str:
-        """Get the entered API key.
-
-        Returns:
-            The cleaned API key.
-        """
-        return self.api_key_input.text().strip().strip("'\"").strip()

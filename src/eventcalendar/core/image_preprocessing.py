@@ -26,10 +26,25 @@ def _get_int_env(name: str, default: int) -> int:
         return default
 
 
+def _get_bool_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_resample_name(default: str = "bicubic") -> str:
+    value = os.environ.get("EVENTCALENDAR_IMAGE_RESAMPLE", default)
+    return str(value).strip().lower()
+
+
 # Conservative defaults: reduce huge images without hurting flyer readability.
 DEFAULT_MAX_EDGE_PX = max(512, min(_get_int_env("EVENTCALENDAR_IMAGE_MAX_EDGE_PX", 2560), 8192))
 DEFAULT_JPEG_QUALITY = max(50, min(_get_int_env("EVENTCALENDAR_IMAGE_JPEG_QUALITY", 88), 95))
 DEFAULT_MAX_BYTES = max(256_000, min(_get_int_env("EVENTCALENDAR_IMAGE_MAX_BYTES", 2_500_000), 25_000_000))
+DEFAULT_RESAMPLE = _get_resample_name("auto")
+DEFAULT_JPEG_OPTIMIZE = _get_bool_env("EVENTCALENDAR_IMAGE_JPEG_OPTIMIZE", False)
+DEFAULT_JPEG_PROGRESSIVE = _get_bool_env("EVENTCALENDAR_IMAGE_JPEG_PROGRESSIVE", False)
 
 
 @dataclass(frozen=True)
@@ -48,12 +63,40 @@ class PreprocessedImage:
                 logger.debug("Failed to delete temp image %s: %s", cleanup_path, exc)
 
 
+def _choose_resample(
+    requested: str,
+    original_max_edge: int,
+    max_edge_px: int,
+    resampling,
+):
+    """Choose resize filter with adaptive fast path for very large downscales."""
+    options = {
+        "lanczos": resampling.LANCZOS,
+        "bicubic": resampling.BICUBIC,
+        "bilinear": resampling.BILINEAR,
+    }
+    name = str(requested).strip().lower()
+    if name in options:
+        return options[name]
+
+    # "auto": for large downscales use BILINEAR for speed, else BICUBIC.
+    if max_edge_px <= 0:
+        return resampling.BICUBIC
+    ratio = original_max_edge / float(max_edge_px)
+    if original_max_edge >= 3000 and ratio >= 1.4:
+        return resampling.BILINEAR
+    return resampling.BICUBIC
+
+
 def preprocess_image_for_upload(
     source_path: str,
     mime_type: Optional[str] = None,
     *,
     max_edge_px: int = DEFAULT_MAX_EDGE_PX,
     jpeg_quality: int = DEFAULT_JPEG_QUALITY,
+    resample: str = DEFAULT_RESAMPLE,
+    jpeg_optimize: bool = DEFAULT_JPEG_OPTIMIZE,
+    jpeg_progressive: bool = DEFAULT_JPEG_PROGRESSIVE,
 ) -> PreprocessedImage:
     """Preprocess an image to reduce upload time and model latency.
 
@@ -68,6 +111,9 @@ def preprocess_image_for_upload(
         mime_type: Original mime type (best-effort hint).
         max_edge_px: Maximum width/height of the output image.
         jpeg_quality: JPEG quality for lossy output.
+        resample: Resize filter ("auto", "bicubic", "bilinear", "lanczos").
+        jpeg_optimize: Whether to run JPEG entropy optimization.
+        jpeg_progressive: Whether to emit progressive JPEGs.
 
     Returns:
         PreprocessedImage pointing to the path to upload, and cleanup paths.
@@ -114,8 +160,14 @@ def preprocess_image_for_upload(
                 return PreprocessedImage(source_path, mime_type)
 
             if resized:
-                resample = getattr(Image, "Resampling", Image).LANCZOS
-                image.thumbnail((max_edge_px, max_edge_px), resample=resample)
+                resampling = getattr(Image, "Resampling", Image)
+                selected_resample = _choose_resample(
+                    requested=resample,
+                    original_max_edge=original_max_edge,
+                    max_edge_px=max_edge_px,
+                    resampling=resampling,
+                )
+                image.thumbnail((max_edge_px, max_edge_px), resample=selected_resample)
 
             has_alpha = image.mode in ("RGBA", "LA") or (
                 image.mode == "P" and "transparency" in image.info
@@ -135,9 +187,10 @@ def preprocess_image_for_upload(
                     image = image.convert("RGB")
                 save_kwargs = {
                     "quality": jpeg_quality,
-                    "optimize": True,
-                    "progressive": True,
+                    "optimize": bool(jpeg_optimize),
                 }
+                if jpeg_progressive:
+                    save_kwargs["progressive"] = True
 
             fd, out_path = tempfile.mkstemp(prefix="eventcalendar_", suffix=out_suffix)
             os.close(fd)

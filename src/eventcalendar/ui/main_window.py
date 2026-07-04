@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve,
@@ -31,8 +31,6 @@ from eventcalendar.config.settings import UI_CONFIG
 from eventcalendar.config.constants import (
     DATE_INDICATORS, TIME_INDICATORS, EVENT_INDICATORS
 )
-from eventcalendar.core.api_client import CalendarAPIClient
-from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_strings
 from eventcalendar.storage.key_manager import load_api_key, check_and_warn_legacy_storage
 from eventcalendar.ui.theme.colors import get_color
 from eventcalendar.ui.theme.scales import (
@@ -49,6 +47,9 @@ from eventcalendar.ui.preview import parse_event_text, format_date_display
 from eventcalendar.ui.error_messages import get_user_friendly_error
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from eventcalendar.core.api_client import CalendarAPIClient
 
 
 class WaveDot(QWidget):
@@ -114,7 +115,7 @@ class NLCalendarCreator(QMainWindow):
         self._init_state()
         self._init_ui()
         self._connect_signals()
-        self._check_legacy_storage()
+        QTimer.singleShot(0, self._warm_storage_state_async)
 
     def _init_window_properties(self) -> None:
         """Set window title, size, and other properties."""
@@ -134,8 +135,17 @@ class NLCalendarCreator(QMainWindow):
 
     def _init_state(self) -> None:
         """Initialize application state."""
-        self.api_client: Optional[CalendarAPIClient] = None
+        self.api_client: Optional["CalendarAPIClient"] = None
+        self._prefetched_api_key: Optional[str] = None
+        self._prefetch_ready = threading.Event()
         self.style_manager = StyleManager()
+        self._preview_title_style_active = ""
+        self._preview_title_style_placeholder = ""
+        self._preview_style_mode: Optional[str] = None
+        self.overlay: Optional[QWidget] = None
+        self._wave_animation: Optional[QParallelAnimationGroup] = None
+        self._wave_dots: List[WaveDot] = []
+        self._dot_opacities: List[QGraphicsOpacityEffect] = []
 
     def _init_ui(self) -> None:
         """Build the complete UI tree with editorial layout."""
@@ -165,7 +175,6 @@ class NLCalendarCreator(QMainWindow):
         self._add_footer_section(content_layout)
 
         outer_layout.addWidget(content_wrapper, 1)
-        self._setup_overlay()
         self._setup_preview_timer()
 
     def _create_main_container(self) -> QWidget:
@@ -335,13 +344,9 @@ class NLCalendarCreator(QMainWindow):
 
         self.preview_event_title = QLabel("Event title \u2022 Date \u2022 Time")
         self.preview_event_title.setWordWrap(True)
-        self.preview_event_title.setStyleSheet(f"""
-            QLabel {{
-                font-family: {body_style["font_family"]};
-                font-size: {px(body_style["size_px"])};
-                color: {get_color('text_tertiary')};
-            }}
-        """)
+        self._rebuild_preview_title_styles()
+        self._preview_style_mode = "placeholder"
+        self.preview_event_title.setStyleSheet(self._preview_title_style_placeholder)
         preview_layout.addWidget(self.preview_event_title)
 
         left_layout.addWidget(preview_container)
@@ -438,6 +443,9 @@ class NLCalendarCreator(QMainWindow):
 
     def _setup_overlay(self) -> None:
         """Set up the processing overlay with warm styling."""
+        if self.overlay is not None:
+            return
+
         self.overlay = QWidget(self.centralWidget())
         self.overlay.setStyleSheet(f"""
             QWidget {{
@@ -588,6 +596,23 @@ class NLCalendarCreator(QMainWindow):
         self._preview_timer.setInterval(UI_CONFIG.preview_debounce_ms)
         self._preview_timer.timeout.connect(self.update_live_preview)
 
+    def _build_preview_title_style(self, *, active: bool) -> str:
+        """Build stylesheet for preview title text."""
+        body_style = TYPOGRAPHY_SCALE["body"]
+        color = get_color("text_primary" if active else "text_tertiary")
+        return f"""
+            QLabel {{
+                font-family: {body_style["font_family"]};
+                font-size: {px(body_style["size_px"])};
+                color: {color};
+            }}
+        """
+
+    def _rebuild_preview_title_styles(self) -> None:
+        """Recompute cached preview title styles for current theme."""
+        self._preview_title_style_active = self._build_preview_title_style(active=True)
+        self._preview_title_style_placeholder = self._build_preview_title_style(active=False)
+
     def _connect_signals(self) -> None:
         """Wire up all signal/slot connections."""
         self.update_status_signal.connect(self._update_status)
@@ -596,11 +621,30 @@ class NLCalendarCreator(QMainWindow):
         self.show_progress_signal.connect(self._show_progress)
         self.finalize_events_signal.connect(self._finalize_events)
 
-    def _check_legacy_storage(self) -> None:
-        """Check for legacy API key storage and log silently."""
-        warning = check_and_warn_legacy_storage()
-        if warning:
-            logger.info("Legacy storage notice: %s", warning)
+    def _warm_storage_state_async(self) -> None:
+        """Warm key storage in background so startup stays responsive."""
+        thread = threading.Thread(
+            target=self._storage_warmup_worker,
+            name="storage_warmup",
+            daemon=True,
+        )
+        thread.start()
+
+    def _storage_warmup_worker(self) -> None:
+        """Background worker for keyring probing and legacy checks."""
+        try:
+            self._prefetched_api_key = load_api_key()
+        except Exception:
+            logger.debug("API key prefetch failed during warmup", exc_info=True)
+        finally:
+            self._prefetch_ready.set()
+
+        try:
+            warning = check_and_warn_legacy_storage()
+            if warning:
+                logger.info("Legacy storage notice: %s", warning)
+        except Exception:
+            logger.debug("Legacy storage check failed during warmup", exc_info=True)
 
     # --- Event Handlers ---
 
@@ -611,17 +655,12 @@ class NLCalendarCreator(QMainWindow):
     def update_live_preview(self) -> None:
         """Update the live preview based on current input."""
         text = self.text_input.toPlainText().strip()
-        body_style = TYPOGRAPHY_SCALE["body"]
 
         if not text:
             self.preview_event_title.setText("Event title \u2022 Date \u2022 Time")
-            self.preview_event_title.setStyleSheet(f"""
-                QLabel {{
-                    font-family: {body_style["font_family"]};
-                    font-size: {px(body_style["size_px"])};
-                    color: {get_color('text_tertiary')};
-                }}
-            """)
+            if self._preview_style_mode != "placeholder":
+                self.preview_event_title.setStyleSheet(self._preview_title_style_placeholder)
+                self._preview_style_mode = "placeholder"
             return
 
         parsed = self.parse_event_text(text)
@@ -638,13 +677,9 @@ class NLCalendarCreator(QMainWindow):
 
         preview_text = " \u2022 ".join(parts)
         self.preview_event_title.setText(preview_text)
-        self.preview_event_title.setStyleSheet(f"""
-            QLabel {{
-                font-family: {body_style["font_family"]};
-                font-size: {px(body_style["size_px"])};
-                color: {get_color('text_primary')};
-            }}
-        """)
+        if self._preview_style_mode != "active":
+            self.preview_event_title.setStyleSheet(self._preview_title_style_active)
+            self._preview_style_mode = "active"
 
     def _toggle_theme(self) -> None:
         """Toggle between light and dark theme."""
@@ -756,7 +791,9 @@ class NLCalendarCreator(QMainWindow):
                 }}
             """)
 
-        # Update live preview text
+        # Update live preview text (force stylesheet refresh for theme colors)
+        self._rebuild_preview_title_styles()
+        self._preview_style_mode = None
         self.update_live_preview()
 
         # Update separator line (HLine frame)
@@ -771,11 +808,12 @@ class NLCalendarCreator(QMainWindow):
                 break
 
         # Update overlay
-        self.overlay.setStyleSheet(f"""
-            QWidget {{
-                background-color: {get_color('surface_overlay')};
-            }}
-        """)
+        if self.overlay is not None:
+            self.overlay.setStyleSheet(f"""
+                QWidget {{
+                    background-color: {get_color('surface_overlay')};
+                }}
+            """)
 
     def _clear_inputs(self) -> None:
         """Clear all input fields."""
@@ -789,10 +827,20 @@ class NLCalendarCreator(QMainWindow):
             # Reload API client with new key
             with self._api_client_lock:
                 self.api_client = None
+                self._prefetched_api_key = None
+                self._prefetch_ready.clear()
+                self._warm_storage_state_async()
 
     def _update_status(self, message: str) -> None:
         """Update the status display."""
         self.processing_label.setText(message)
+
+    def _show_transient_notice(self, message: str, timeout_ms: int = 6000) -> None:
+        """Show non-blocking notice in the status bar."""
+        try:
+            self.statusBar().showMessage(message, timeout_ms)
+        except Exception:
+            logger.info("Notice: %s", message)
 
     def _set_ui_enabled(self, enabled: bool) -> None:
         """Enable or disable UI elements."""
@@ -803,6 +851,10 @@ class NLCalendarCreator(QMainWindow):
     def _show_progress(self, show: bool) -> None:
         """Show or hide the progress overlay."""
         if show:
+            if self.overlay is None:
+                self._setup_overlay()
+            if self.overlay is None or self._wave_animation is None:
+                return
             self.overlay.setGeometry(self.centralWidget().rect())
             self.overlay.show()
             self.overlay.raise_()
@@ -812,16 +864,19 @@ class NLCalendarCreator(QMainWindow):
                 opacity.setOpacity(1.0)
             self._wave_animation.start()
         else:
-            self._wave_animation.stop()
-            self.overlay.hide()
+            if self._wave_animation is not None:
+                self._wave_animation.stop()
+            if self.overlay is not None:
+                self.overlay.hide()
 
     # --- Event Processing ---
 
     def process_event(self) -> None:
         """Process the event creation request."""
-        # Initialize API client if needed
+        # Ensure an API key is available (client initialization happens in worker thread)
         if not self._ensure_api_client():
             return
+        api_key = self._prefetched_api_key
 
         # Get input data
         event_description = self.text_input.toPlainText().strip()
@@ -847,38 +902,35 @@ class NLCalendarCreator(QMainWindow):
 
         # Submit to thread pool
         image_payloads = list(self.image_area.image_data)
-        future = self._executor.submit(self._create_event_thread, event_description, image_payloads)
+        future = self._executor.submit(
+            self._create_event_thread,
+            event_description,
+            image_payloads,
+            api_key,
+        )
         with self._threads_lock:
             self._active_futures.add(future)
         future.add_done_callback(self._on_future_done)
 
     def _ensure_api_client(self) -> bool:
-        """Ensure API client is initialized."""
-        with self._api_client_lock:
-            if self.api_client is not None:
-                return True
-
+        """Ensure an API key is available for event processing."""
+        if self._prefetch_ready.is_set():
+            api_key = self._prefetched_api_key
+        else:
             api_key = load_api_key()
-            if not api_key:
-                dialog = APIKeySetupDialog(self)
-                if dialog.exec():
-                    api_key = load_api_key()
-                else:
-                    return False
+            self._prefetched_api_key = api_key
+            self._prefetch_ready.set()
 
-            if api_key:
-                try:
-                    self.api_client = CalendarAPIClient(api_key)
-                    return True
-                except Exception as e:
-                    logger.error("Failed to initialize API client: %s", e)
-                    QMessageBox.critical(
-                        self,
-                        "Error",
-                        f"Failed to initialize API client: {e}"
-                    )
+        if not api_key:
+            dialog = APIKeySetupDialog(self)
+            if dialog.exec():
+                api_key = load_api_key()
+                self._prefetched_api_key = api_key
+                self._prefetch_ready.set()
+            else:
+                return False
 
-            return False
+        return bool(api_key)
 
     def _validate_event_text(self, text: str) -> bool:
         """Validate that text looks like an event description."""
@@ -900,9 +952,25 @@ class NLCalendarCreator(QMainWindow):
 
         return True
 
-    def _create_event_thread(self, event_description: str, image_payloads: List[ImageAttachmentPayload]) -> None:
+    def _create_event_thread(
+        self,
+        event_description: str,
+        image_payloads: List[ImageAttachmentPayload],
+        api_key: Optional[str],
+    ) -> None:
         """Worker thread for event creation."""
         try:
+            if not api_key:
+                raise ValueError("No API key available for event creation.")
+
+            if self.api_client is None:
+                self.update_status_signal.emit("Initializing AI client...")
+                with self._api_client_lock:
+                    if self.api_client is None:
+                        from eventcalendar.core.api_client import CalendarAPIClient
+
+                        self.api_client = CalendarAPIClient(api_key)
+
             image_data = [
                 img.materialize(include_base64=False) for img in image_payloads
             ]
@@ -955,6 +1023,8 @@ class NLCalendarCreator(QMainWindow):
 
     def _build_merged_ics(self, events: List[Dict]) -> str:
         """Build ICS strings and merge them."""
+        from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_strings
+
         ics_strings, warnings = build_ics_from_events(events)
 
         if not ics_strings:
@@ -962,7 +1032,11 @@ class NLCalendarCreator(QMainWindow):
 
         if warnings:
             warning_text = "\n".join(warnings)
-            QMessageBox.warning(self, "Warnings", warning_text)
+            logger.warning("ICS warnings:\n%s", warning_text)
+            preview_warning = warnings[0]
+            if len(warnings) > 1:
+                preview_warning = f"{preview_warning} (+{len(warnings) - 1} more)"
+            self._show_transient_notice(f"Created with warning: {preview_warning}", timeout_ms=8000)
 
         return combine_ics_strings(ics_strings)
 
@@ -1009,7 +1083,7 @@ class NLCalendarCreator(QMainWindow):
         else:
             message = f"{event_count} events created successfully!"
 
-        QMessageBox.information(self, "Success", message)
+        self._show_transient_notice(message, timeout_ms=5000)
         self._clear_inputs()
 
     def _schedule_temp_cleanup(self, file_path: str) -> None:

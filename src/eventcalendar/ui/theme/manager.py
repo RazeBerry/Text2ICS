@@ -41,16 +41,6 @@ class ThemeManager:
             cls._theme = "dark" if cls._theme == "light" else "light"
             return cls._theme
 
-    @classmethod
-    def is_dark(cls) -> bool:
-        """Check if dark theme is active.
-
-        Returns:
-            True if dark theme is active.
-        """
-        return cls.get_theme() == "dark"
-
-
 def set_theme(theme: str) -> None:
     """Set the current theme ('light' or 'dark').
 

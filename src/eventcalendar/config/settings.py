@@ -23,7 +23,6 @@ class UIConfig:
     """Configuration for UI behavior."""
     preview_debounce_ms: int = 120
     temp_file_cleanup_delay_ms: int = 60_000
-    user_decision_timeout_s: int = 30
     min_window_size: Tuple[int, int] = (700, 520)
     default_window_size: Tuple[int, int] = (750, 560)
     executor_max_workers: int = 2

@@ -1,7 +1,8 @@
 import os
 import subprocess
 import sys
-from datetime import datetime
+import tempfile
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -10,7 +11,11 @@ from icalendar import Calendar
 # Ensure local imports work without requiring an editable install.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from eventcalendar.core.ics_builder import combine_ics_strings
+from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_strings
+from eventcalendar.core.timezone_utils import (
+    _parse_utc_offset_seconds,
+    extract_timezone_from_time_string,
+)
 from eventcalendar.ui.preview import parse_event_text, format_date_display
 from eventcalendar.ui.theme.colors import COLORS
 
@@ -40,6 +45,19 @@ def qt_app() -> Any:
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def isolate_ui_storage_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep UI integration tests deterministic by disabling background keyring warmup."""
+    if not UI_AVAILABLE:
+        return
+
+    from eventcalendar.ui import main_window
+
+    monkeypatch.setattr(main_window, "load_api_key", lambda: "AIzaUiTestKey")
+    monkeypatch.setattr(main_window, "check_and_warn_legacy_storage", lambda: None)
+    monkeypatch.setattr(main_window.NLCalendarCreator, "_warm_storage_state_async", lambda self: None)
 
 
 def test_combine_ics_strings_preserves_timezone_and_rewrites_uids() -> None:
@@ -110,6 +128,115 @@ def test_combine_ics_strings_requires_input() -> None:
         combine_ics_strings([])
 
 
+def test_combine_ics_strings_produces_structurally_valid_output() -> None:
+    """Guard against merged headers leaking VEVENT/VALARM properties (Fix 1).
+
+    Validated textually rather than through icalendar's lenient parser, which
+    would silently tolerate an unbalanced BEGIN/END structure.
+    """
+    events = [
+        {
+            "uid": "u1", "title": "Dinner", "start_time": "7:00 PM",
+            "end_time": "9:00 PM", "date": "2026-07-09",
+            "timezone": "America/New_York", "location": "Cafe", "description": "x",
+        },
+        {
+            "uid": "u2", "title": "Flight", "start_time": "8:00 AM",
+            "end_time": "4:30 PM", "date": "2026-07-10",
+            "timezone": "America/Los_Angeles", "end_timezone": "America/New_York",
+        },
+    ]
+
+    ics_strings, _warnings = build_ics_from_events(events)
+    combined = combine_ics_strings(ics_strings)
+    lines = [line for line in combined.split("\r\n") if line]
+
+    assert lines.count("BEGIN:VCALENDAR") == 1
+    assert lines.count("END:VCALENDAR") == 1
+    assert lines[0] == "BEGIN:VCALENDAR"
+    assert lines[-1] == "END:VCALENDAR"
+
+    assert lines.count("BEGIN:VEVENT") == lines.count("END:VEVENT") == 2
+    assert lines.count("BEGIN:VALARM") == lines.count("END:VALARM") == 2
+
+    first_vevent = lines.index("BEGIN:VEVENT")
+    forbidden = (
+        "DTSTART", "DTEND", "DTSTAMP", "SUMMARY", "UID",
+        "ACTION", "TRIGGER", "DESCRIPTION", "LOCATION", "END:VALARM",
+    )
+    for line in lines[:first_vevent]:
+        assert not any(line.startswith(prefix) for prefix in forbidden), (
+            f"Header leak before first VEVENT: {line!r}"
+        )
+
+
+def test_zero_duration_event_assumes_one_hour() -> None:
+    """A start == end time should yield a 1-hour event, not a 24-hour one (Fix 3)."""
+    events = [{
+        "uid": "z1", "title": "Dinner", "start_time": "7:00 PM",
+        "end_time": "7:00 PM", "date": "2026-07-09", "timezone": "America/New_York",
+    }]
+
+    ics_strings, warnings = build_ics_from_events(events)
+    assert len(ics_strings) == 1
+
+    vevent = list(Calendar.from_ical(ics_strings[0].encode("utf-8")).walk("VEVENT"))[0]
+    dtstart = vevent.get("DTSTART").dt
+    dtend = vevent.get("DTEND").dt
+
+    assert dtend - dtstart == timedelta(hours=1)
+    assert any("1-hour duration" in w for w in warnings)
+
+
+def test_cross_midnight_event_rolls_end_date() -> None:
+    """A genuine cross-midnight event must still roll the end date (Fix 3 regression)."""
+    events = [{
+        "uid": "cm1", "title": "Late night", "start_time": "11:00 PM",
+        "end_time": "1:00 AM", "date": "2026-07-09", "timezone": "America/New_York",
+    }]
+
+    ics_strings, _warnings = build_ics_from_events(events)
+    assert len(ics_strings) == 1
+
+    vevent = list(Calendar.from_ical(ics_strings[0].encode("utf-8")).walk("VEVENT"))[0]
+    dtstart = vevent.get("DTSTART").dt
+    dtend = vevent.get("DTEND").dt
+
+    assert dtend > dtstart
+    assert dtend - dtstart == timedelta(hours=2)
+
+
+@pytest.mark.parametrize(
+    "time_str,expected",
+    [
+        ("19:30-20:00", ("19:30-20:00", None)),
+        ("10:00-11:30", ("10:00-11:30", None)),
+        ("7:30 PM - 9:00 PM", ("7:30 PM - 9:00 PM", None)),
+        ("19:30+0200", ("19:30", "+0200")),
+        ("19:30Z", ("19:30", "Z")),
+        ("7pm CET", ("7pm", "CET")),
+        ("7:30 PM EST", ("7:30 PM", "EST")),
+        ("10:00 (America/Los_Angeles)", ("10:00", "America/Los_Angeles")),
+    ],
+)
+def test_extract_timezone_from_time_string(time_str: str, expected: tuple) -> None:
+    assert extract_timezone_from_time_string(time_str) == expected
+
+
+@pytest.mark.parametrize(
+    "offset,expected",
+    [
+        ("+15:00", None),
+        ("-13:00", None),
+        ("+14:00", 50400),
+        ("-12:00", -43200),
+        ("+05:45", 20700),
+    ],
+)
+def test_parse_utc_offset_seconds_range(offset: str, expected: Any) -> None:
+    assert _parse_utc_offset_seconds(offset) == expected
+
+
 def test_parse_event_text_extracts_components() -> None:
     ref = datetime(2024, 4, 1, 12, 0, 0)
     parsed = parse_event_text("Dinner with Mia next Tuesday at 7pm", reference_date=ref)
@@ -148,7 +275,7 @@ def test_process_event_uses_executor(qt_app: Any) -> None:
     submitted_tasks: list[dict[str, Any]] = []
 
     class MockFuture:
-        def add_done_callback(self, callback: Any) -> None:
+        def add_done_callback(self, _callback: Any) -> None:
             pass
 
     def mock_submit(fn: Any, *args: Any, **kwargs: Any) -> MockFuture:
@@ -205,3 +332,202 @@ def test_update_live_preview_resets_to_placeholder(qt_app: Any) -> None:
 
     window.close()
 
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_overlay_is_built_lazily(qt_app: Any) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+
+    window = NLCalendarCreator()
+    window.show()
+    qt_app.processEvents()
+    assert window.overlay is None
+
+    window._show_progress(True)
+    qt_app.processEvents()
+    assert window.overlay is not None
+    assert window.overlay.isVisible()
+
+    window._show_progress(False)
+    assert not window.overlay.isVisible()
+    window.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_ensure_api_client_only_checks_key_not_client_init(qt_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+
+    window = NLCalendarCreator()
+    monkeypatch.setattr("eventcalendar.ui.main_window.load_api_key", lambda: "AIzaFakeForTest")
+
+    assert window._ensure_api_client() is True
+    assert window.api_client is None
+    assert window._prefetched_api_key == "AIzaFakeForTest"
+    window.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_process_event_passes_api_key_to_worker(qt_app: Any) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+
+    window = NLCalendarCreator()
+    window.text_input.setPlainText("Test event tomorrow at 7pm")
+    window._prefetched_api_key = "AIzaFromPrefetch"
+    window._ensure_api_client = lambda: True  # type: ignore[assignment]
+
+    submitted_tasks: list[dict[str, Any]] = []
+
+    class MockFuture:
+        def add_done_callback(self, _callback: Any) -> None:
+            pass
+
+    def mock_submit(fn: Any, *args: Any, **kwargs: Any) -> MockFuture:
+        submitted_tasks.append({"fn": fn, "args": args, "kwargs": kwargs})
+        return MockFuture()
+
+    window._executor.submit = mock_submit  # type: ignore[assignment]
+    window.process_event()
+
+    assert len(submitted_tasks) == 1
+    assert submitted_tasks[0]["fn"] == window._create_event_thread
+    assert submitted_tasks[0]["args"][2] == "AIzaFromPrefetch"
+    window.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_worker_initializes_client_and_handles_empty_events(
+    qt_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+    import eventcalendar.core.api_client as api_client_module
+
+    window = NLCalendarCreator()
+    window._setup_overlay()
+    statuses: list[str] = []
+    enabled: list[bool] = []
+    progress: list[bool] = []
+    window.update_status_signal.connect(statuses.append)
+    window.enable_ui_signal.connect(enabled.append)
+    window.show_progress_signal.connect(progress.append)
+
+    class FakeClient:
+        def __init__(self, api_key: str):
+            self.api_key = api_key
+
+        def get_event_data(self, event_description: str, image_data: list[Any], status_callback: Any) -> list[Any]:
+            assert event_description == "demo"
+            assert image_data == []
+            return []
+
+    monkeypatch.setattr(api_client_module, "CalendarAPIClient", FakeClient)
+    window.api_client = None
+    window._create_event_thread("demo", [], "AIzaFakeKey")
+    qt_app.processEvents()
+
+    assert isinstance(window.api_client, FakeClient)
+    assert statuses[0] == "Initializing AI client..."
+    assert statuses[-1] == "No events found"
+    assert enabled[-1] is True
+    assert progress[-1] is False
+    window.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_build_merged_ics_uses_non_blocking_warning_notice(
+    qt_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+    from PyQt6.QtWidgets import QMessageBox
+    import eventcalendar.core.ics_builder as ics_builder_module
+
+    window = NLCalendarCreator()
+    notices: list[tuple[str, int]] = []
+    window._show_transient_notice = lambda message, timeout_ms=6000: notices.append((message, timeout_ms))  # type: ignore[assignment]
+
+    monkeypatch.setattr(
+        ics_builder_module,
+        "build_ics_from_events",
+        lambda events: (["BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"], ["Timezone fallback used"]),
+    )
+    monkeypatch.setattr(ics_builder_module, "combine_ics_strings", lambda parts: parts[0])
+
+    def fail_if_modal(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("Blocking warning dialog should not be used.")
+
+    monkeypatch.setattr(QMessageBox, "warning", fail_if_modal)
+    merged = window._build_merged_ics([{"uid": "1"}])
+
+    assert merged.startswith("BEGIN:VCALENDAR")
+    assert notices
+    assert "Created with warning:" in notices[0][0]
+    window.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_show_success_uses_non_blocking_notice(qt_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+    from PyQt6.QtWidgets import QMessageBox
+
+    window = NLCalendarCreator()
+    notices: list[str] = []
+    cleared: list[bool] = []
+    window._show_transient_notice = lambda message, timeout_ms=6000: notices.append(message)  # type: ignore[assignment]
+    window._clear_inputs = lambda: cleared.append(True)  # type: ignore[assignment]
+
+    def fail_if_modal(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("Blocking success dialog should not be used.")
+
+    monkeypatch.setattr(QMessageBox, "information", fail_if_modal)
+    window._show_success(2)
+
+    assert notices == ["2 events created successfully!"]
+    assert cleared == [True]
+    window.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_image_area_click_dialog_selects_image(qt_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from eventcalendar.ui.widgets.image_area import ImageAttachmentArea
+    from PyQt6.QtWidgets import QFileDialog
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp.write(b"not-a-real-png-but-ok-for-copy")
+        image_path = tmp.name
+
+    area = ImageAttachmentArea()
+    try:
+        monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *args, **kwargs: ([image_path], ""))
+        area._select_images_from_dialog()
+
+        assert len(area.image_data) == 1
+        assert area.primary_label.text() == "1 image ready"
+        area.reset_state()
+        area.close()
+    finally:
+        os.unlink(image_path)
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_image_area_left_click_opens_picker(qt_app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from eventcalendar.ui.widgets.image_area import ImageAttachmentArea
+    from PyQt6.QtCore import Qt
+
+    area = ImageAttachmentArea()
+    called: list[bool] = []
+    monkeypatch.setattr(area, "_select_images_from_dialog", lambda: called.append(True))
+
+    class DummyMouseEvent:
+        def __init__(self) -> None:
+            self.accepted = False
+
+        def button(self):
+            return Qt.MouseButton.LeftButton
+
+        def accept(self) -> None:
+            self.accepted = True
+
+    event = DummyMouseEvent()
+    area.mousePressEvent(event)
+
+    assert called == [True]
+    assert event.accepted is True
+    area.close()

@@ -16,6 +16,14 @@ from eventcalendar.config.constants import ABBR_TO_TZ
 logger = logging.getLogger(__name__)
 
 _IANA_TZ_PATTERN = re.compile(r"\b([A-Za-z]+/[A-Za-z0-9_\-]+(?:/[A-Za-z0-9_\-]+)?)\b")
+# Two clock times joined by a dash ("19:30-20:00", "7:30 PM - 9:00 PM"). Each
+# side is a clock time with an optional am/pm suffix.
+_TIME_RANGE_PATTERN = re.compile(
+    r"^\s*\d{1,2}(?:[:.]\d{2})?\s*(?:[ap]\.?m\.?)?"
+    r"\s*[-–—]\s*"
+    r"\d{1,2}(?:[:.]\d{2})?\s*(?:[ap]\.?m\.?)?\s*$",
+    re.IGNORECASE,
+)
 _UTC_OFFSET_PATTERN = re.compile(
     r"^(?:(UTC|GMT)\s*)?(?P<sign>[+-])(?P<hours>\d{1,2})(?::?(?P<minutes>\d{2}))?$",
     re.IGNORECASE,
@@ -62,9 +70,14 @@ def _parse_utc_offset_seconds(tz_str: str) -> Optional[int]:
     sign = -1 if match.group("sign") == "-" else 1
     hours = int(match.group("hours"))
     minutes = int(match.group("minutes") or "0")
-    if hours > 23 or minutes > 59:
+    if minutes > 59:
         return None
-    return sign * (hours * 3600 + minutes * 60)
+    total_seconds = sign * (hours * 3600 + minutes * 60)
+    # Real-world UTC offsets only span -12:00 .. +14:00 (IANA range); anything
+    # outside is almost certainly a misparsed time range, not an offset.
+    if total_seconds < -12 * 3600 or total_seconds > 14 * 3600:
+        return None
+    return total_seconds
 
 
 def extract_timezone_from_time_string(time_str: str) -> Tuple[str, Optional[str]]:
@@ -96,6 +109,14 @@ def extract_timezone_from_time_string(time_str: str) -> Tuple[str, Optional[str]
         tz_candidate = iana_match.group(1)
         cleaned = (s[:iana_match.start()] + s[iana_match.end():]).strip()
         return cleaned, tz_candidate
+
+    # A time range is not a timezone offset: "19:30-20:00" must not be read as
+    # "19:30" at UTC-20:00. Detect ranges before the attached-offset branch.
+    # Trade-off: a genuine attached NEGATIVE offset ("19:30-08:00") is
+    # indistinguishable from a range and is treated as a range; positive offsets
+    # ("19:30+0200") and "Z" are unaffected.
+    if _TIME_RANGE_PATTERN.match(s):
+        return s, None
 
     # Trailing Z or numeric offset attached to the time: "19:30Z", "19:30+0200"
     attached = re.search(r"^(?P<time>.*?)(?P<tz>Z|[+-]\d{2}:?\d{2})$", s, re.IGNORECASE)
@@ -223,22 +244,6 @@ def resolve_timezone(tz_str: str, event_title: Optional[str] = None) -> Tuple[ob
             logger.warning(warning)
 
     return local_tz, warning
-
-
-def attach_timezone(tzobj, naive_dt: datetime) -> datetime:
-    """Return timezone-aware datetime, using proper DST rules where possible.
-
-    Args:
-        tzobj: The timezone object (pytz or dateutil).
-        naive_dt: A naive datetime to attach the timezone to.
-
-    Returns:
-        A timezone-aware datetime.
-    """
-    dt, warning = attach_timezone_with_warnings(tzobj, naive_dt)
-    if warning:
-        logger.warning(warning)
-    return dt
 
 
 _RAISE_POLICIES = {"raise", "error", "strict"}

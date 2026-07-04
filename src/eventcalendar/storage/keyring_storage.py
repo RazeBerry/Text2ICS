@@ -11,11 +11,6 @@ logger = logging.getLogger(__name__)
 _keyring_available = True
 
 
-def is_keyring_available() -> bool:
-    """Check if keyring is available for use."""
-    return _keyring_available
-
-
 def load_from_keyring() -> Optional[str]:
     """Load the API key from the OS keyring if available.
 
@@ -67,26 +62,3 @@ def save_to_keyring(api_key: str) -> bool:
         _keyring_available = False
         return False
 
-
-def delete_from_keyring() -> bool:
-    """Delete the API key from the OS keyring.
-
-    Returns:
-        True if deleted successfully, False otherwise.
-    """
-    global _keyring_available
-    if not _keyring_available:
-        return False
-
-    try:
-        import keyring
-    except ImportError:
-        _keyring_available = False
-        return False
-
-    try:
-        keyring.delete_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_NAME)
-        return True
-    except Exception as e:
-        logger.warning("Keyring delete failed: %s", e)
-        return False

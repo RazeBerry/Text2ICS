@@ -6,10 +6,7 @@ These tests verify that critical thread safety fixes are working correctly.
 import os
 import sys
 import threading
-import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor, wait
-from unittest.mock import Mock, patch, MagicMock
 
 # Ensure local imports work without requiring an editable install.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -58,8 +55,6 @@ class TestThemeManagerThreadSafety(unittest.TestCase):
     def test_concurrent_theme_writes(self):
         """Verify multiple threads can write theme without corruption."""
         errors = []
-        write_count = {"light": 0, "dark": 0}
-
         def toggle_theme():
             try:
                 for _ in range(50):

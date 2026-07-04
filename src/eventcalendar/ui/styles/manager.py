@@ -45,26 +45,10 @@ class StyleManager:
             widget, style_fn = self._widgets[name]
             widget.setStyleSheet(style_fn())
 
-    def refresh(self, name: str) -> None:
-        """Refresh a specific widget's style.
-
-        Args:
-            name: Name of the registered widget.
-        """
-        self._apply(name)
-
     def refresh_all(self) -> None:
         """Refresh all registered widget styles."""
         for name in self._widgets:
             self._apply(name)
-
-    def unregister(self, name: str) -> None:
-        """Remove a widget from management.
-
-        Args:
-            name: Name of the widget to unregister.
-        """
-        self._widgets.pop(name, None)
 
     def clear(self) -> None:
         """Clear all registered widgets."""

@@ -223,10 +223,22 @@ def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
             def tz_key(tzobj) -> str:
                 return str(getattr(tzobj, "zone", getattr(tzobj, "key", str(tzobj))))
 
+            naive_duration = end_dt_naive - start_dt_naive
+
+            # Zero-duration input: the LLM echoed the start time as the end time
+            # (only a start time was stated). Assume a 1-hour event rather than
+            # rolling the end date forward into a full 24-hour block.
+            if naive_duration == timedelta(0):
+                candidate_end_dt = start_dt + timedelta(hours=1)
+                if hasattr(end_tz, "normalize"):
+                    candidate_end_dt = end_tz.normalize(candidate_end_dt)
+                end_dt = candidate_end_dt
+                end_dt_utc = candidate_end_dt.astimezone(pytz.utc)
+                warnings.append("End time equals start time; assumed a 1-hour duration.")
+
             # DST edge cases can make an end time appear to be <= start time even when the
             # user provided a positive wall-time duration (e.g. 02:30–03:30 on spring-forward).
             # In that case, preserve the naive duration rather than rolling the end date.
-            naive_duration = end_dt_naive - start_dt_naive
             if naive_duration > timedelta(0) and tz_key(start_tz) == tz_key(end_tz):
                 candidate_end_dt = start_dt + naive_duration
                 if hasattr(end_tz, "normalize"):
@@ -424,10 +436,19 @@ def _create_merged_calendar(calendars: List[Calendar]) -> Calendar:
     """
     merged_calendar = Calendar()
 
-    # Copy properties from source calendars
+    # Copy each source calendar's OWN top-level properties. Component.items()
+    # yields only this VCALENDAR's properties; property_items() recurses into
+    # subcomponents and injects synthetic BEGIN/END markers, which would leak
+    # VEVENT/VALARM properties onto the merged header and unbalance the output.
     for calendar in calendars:
-        for prop, value in calendar.property_items():
-            if merged_calendar.get(prop) is None:
+        for prop, value in calendar.items():
+            if merged_calendar.get(prop) is not None:
+                continue
+            # A property supplied multiple times surfaces as a list; add each.
+            if isinstance(value, list):
+                for element in value:
+                    merged_calendar.add(prop, element)
+            else:
                 merged_calendar.add(prop, value)
 
     # Ensure mandatory headers exist

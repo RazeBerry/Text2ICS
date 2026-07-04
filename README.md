@@ -143,6 +143,26 @@ python test_api_client.py
 
 This will test the basic functionality of the API client with a simple example.
 
+## Quality Checks
+
+Run all quality gates locally before pushing:
+
+```bash
+ruff check .
+vulture .
+pytest
+```
+
+## Profiling
+
+Use the built-in profiler harness:
+
+```bash
+python scripts/profile_performance.py
+# machine-readable output
+python scripts/profile_performance.py --json > profile.json
+```
+
 ## Project Structure
 
 The app lives in `src/eventcalendar/`. Root-level files like `Calender.py` and

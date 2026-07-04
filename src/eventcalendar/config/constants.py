@@ -27,10 +27,6 @@ DEFAULT_EVENT_TITLE = "No Title"
 # Status callback messages
 STATUS_ATTEMPTING = "Attempting to get event details... (Try {attempt}/{max_retries})"
 STATUS_SUCCESS = "Successfully extracted {count} event(s)."
-STATUS_ERROR_EXPIRED = "Error: Your API key has expired. Please renew it."
-STATUS_ERROR_INVALID = "Error: Your API key is invalid."
-STATUS_ERROR_NON_RETRYABLE = "Error: {error_type} - this error cannot be retried."
-STATUS_RETRYING = "Error occurred ({error_type}), retrying in {delay:.0f} seconds..."
 STATUS_MAX_RETRIES = "Error: Max retries reached. Failed to create event."
 STATUS_FAILED = "Error: Failed to create event after retries."
 

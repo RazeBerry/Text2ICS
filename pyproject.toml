@@ -39,6 +39,8 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-qt>=4.0.0",
+    "ruff>=0.6.0",
+    "vulture>=2.10",
 ]
 
 [project.scripts]
@@ -59,3 +61,21 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v"
+
+[tool.vulture]
+ignore_decorators = ["@pytest.fixture"]
+ignore_names = [
+    "paintEvent",
+    "dragEnterEvent",
+    "dropEvent",
+    "qt_app",
+    "create_calendar_event",
+    "from_dict",
+    "to_dict",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"Calender.py" = ["E402"]
+"api_client.py" = ["E402"]
+"config.py" = ["E402"]
+"exceptions.py" = ["E402"]

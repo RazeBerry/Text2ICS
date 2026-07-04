@@ -21,8 +21,6 @@ def generate_icon(size: int = 1024) -> Image.Image:
     card_border = (220, 215, 210)     # warm gray border
     text_dark = (120, 110, 105)       # warm gray for date numbers
     text_light = (170, 162, 158)      # lighter warm gray
-    shadow_color = (0, 0, 0, 25)      # subtle shadow
-
     # Dimensions
     margin = int(size * 0.08)
     card_left = margin

@@ -24,21 +24,3 @@ def get_resource_path(relative_path: str) -> str:
         base_path = Path(__file__).parent.parent.parent.parent
 
     return str(base_path / relative_path)
-
-
-def get_package_dir() -> Path:
-    """Get the eventcalendar package directory.
-
-    Returns:
-        Path to the eventcalendar package.
-    """
-    return Path(__file__).parent.parent
-
-
-def get_project_root() -> Path:
-    """Get the project root directory.
-
-    Returns:
-        Path to the project root.
-    """
-    return Path(__file__).parent.parent.parent.parent
