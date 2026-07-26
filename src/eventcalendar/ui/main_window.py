@@ -9,18 +9,17 @@ while remaining approachable and functional.
 
 import logging
 import os
-import subprocess
-import sys
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import CancelledError, ThreadPoolExecutor, Future
+from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import (
-    Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve,
+    Qt, QTimer, QUrl, pyqtSignal, QPropertyAnimation, QEasingCurve,
     QSequentialAnimationGroup, QParallelAnimationGroup, pyqtProperty, QPointF
 )
-from PyQt6.QtGui import QCloseEvent, QPainter, QColor, QPen
+from PyQt6.QtGui import QCloseEvent, QDesktopServices, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QLabel, QMessageBox, QSizePolicy, QFrame,
@@ -31,7 +30,11 @@ from eventcalendar.config.settings import UI_CONFIG
 from eventcalendar.config.constants import (
     DATE_INDICATORS, TIME_INDICATORS, EVENT_INDICATORS
 )
-from eventcalendar.storage.key_manager import load_api_key, check_and_warn_legacy_storage
+from eventcalendar.storage.key_manager import (
+    check_and_warn_legacy_storage,
+    delete_legacy_key_file,
+    load_api_key,
+)
 from eventcalendar.ui.theme.colors import get_color
 from eventcalendar.ui.theme.scales import (
     TYPOGRAPHY_SCALE, SPACING_SCALE, BORDER_RADIUS,
@@ -101,7 +104,8 @@ class NLCalendarCreator(QMainWindow):
     enable_ui_signal = pyqtSignal(bool)
     clear_input_signal = pyqtSignal()
     show_progress_signal = pyqtSignal(bool)
-    finalize_events_signal = pyqtSignal(list)
+    finalize_events_signal = pyqtSignal(object)
+    legacy_storage_signal = pyqtSignal(str)
 
     def __init__(self):
         """Initialize the main window."""
@@ -132,6 +136,7 @@ class NLCalendarCreator(QMainWindow):
         self._active_futures: set = set()
         self._threads_lock = threading.Lock()
         self._api_client_lock = threading.Lock()
+        self._cancel_event = threading.Event()
 
     def _init_state(self) -> None:
         """Initialize application state."""
@@ -146,6 +151,8 @@ class NLCalendarCreator(QMainWindow):
         self._wave_animation: Optional[QParallelAnimationGroup] = None
         self._wave_dots: List[WaveDot] = []
         self._dot_opacities: List[QGraphicsOpacityEffect] = []
+        self._temp_ics_paths: set[str] = set()
+        self._closing = False
 
     def _init_ui(self) -> None:
         """Build the complete UI tree with editorial layout."""
@@ -620,6 +627,7 @@ class NLCalendarCreator(QMainWindow):
         self.clear_input_signal.connect(self._clear_inputs)
         self.show_progress_signal.connect(self._show_progress)
         self.finalize_events_signal.connect(self._finalize_events)
+        self.legacy_storage_signal.connect(self._handle_legacy_storage_notice)
 
     def _warm_storage_state_async(self) -> None:
         """Warm key storage in background so startup stays responsive."""
@@ -642,7 +650,7 @@ class NLCalendarCreator(QMainWindow):
         try:
             warning = check_and_warn_legacy_storage()
             if warning:
-                logger.info("Legacy storage notice: %s", warning)
+                self.legacy_storage_signal.emit(warning)
         except Exception:
             logger.debug("Legacy storage check failed during warmup", exc_info=True)
 
@@ -826,10 +834,31 @@ class NLCalendarCreator(QMainWindow):
         if dialog.exec():
             # Reload API client with new key
             with self._api_client_lock:
+                if self.api_client is not None:
+                    self.api_client.close()
                 self.api_client = None
                 self._prefetched_api_key = None
                 self._prefetch_ready.clear()
                 self._warm_storage_state_async()
+
+    def _handle_legacy_storage_notice(self, message: str) -> None:
+        """Offer removal of a migrated plaintext key without deleting silently."""
+        if self._closing:
+            return
+        if "migrated" not in message.lower():
+            self._show_transient_notice(message, timeout_ms=0)
+            return
+        reply = QMessageBox.question(
+            self,
+            "Remove insecure key file?",
+            f"{message}\n\nRemove the legacy plaintext Gemini credentials now? "
+            "Other settings in the file will be preserved.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            success, result_message = delete_legacy_key_file()
+            self._show_transient_notice(result_message, timeout_ms=8000 if success else 0)
 
     def _update_status(self, message: str) -> None:
         """Update the status display."""
@@ -900,6 +929,7 @@ class NLCalendarCreator(QMainWindow):
                 return
 
         # Disable UI and show progress
+        self._cancel_event.clear()
         self.enable_ui_signal.emit(False)
         self.show_progress_signal.emit(True)
 
@@ -979,26 +1009,31 @@ class NLCalendarCreator(QMainWindow):
             ]
 
             def status_callback(msg: str) -> None:
-                self.update_status_signal.emit(msg)
+                if not self._closing and not self._cancel_event.is_set():
+                    self.update_status_signal.emit(msg)
 
-            events = self.api_client.get_event_data(
+            extraction = self.api_client.extract_events(
                 event_description,
                 image_data,
-                status_callback
+                status_callback,
+                cancel_event=self._cancel_event,
             )
 
-            if events:
-                self.finalize_events_signal.emit(events)
-            else:
+            if extraction.events and not self._closing:
+                self.finalize_events_signal.emit(extraction)
+            elif not self._closing:
                 self.update_status_signal.emit("No events found")
                 self.enable_ui_signal.emit(True)
                 self.show_progress_signal.emit(False)
 
+        except CancelledError:
+            logger.debug("Event extraction cancelled")
         except Exception as e:
             logger.error("Error creating event: %s", e)
-            self.update_status_signal.emit(get_user_friendly_error(e))
-            self.enable_ui_signal.emit(True)
-            self.show_progress_signal.emit(False)
+            if not self._closing:
+                self.update_status_signal.emit(get_user_friendly_error(e))
+                self.enable_ui_signal.emit(True)
+                self.show_progress_signal.emit(False)
 
     def _on_future_done(self, future: Future) -> None:
         """Callback when a future completes."""
@@ -1007,11 +1042,16 @@ class NLCalendarCreator(QMainWindow):
 
     # --- Event Finalization ---
 
-    def _finalize_events(self, events: List[Dict]) -> None:
+    def _finalize_events(self, extraction) -> None:
         """Finalize events by building ICS and opening calendar."""
+        if self._closing:
+            return
+        events = extraction.events if hasattr(extraction, "events") else extraction
+        extraction_warnings = list(getattr(extraction, "warnings", []))
         try:
             self.update_status_signal.emit("Creating calendar events...")
             ics_content, created_count, warnings = self._build_merged_ics(events)
+            warnings = [*extraction_warnings, *warnings]
             self._open_in_calendar(ics_content, created_count, len(events), warnings)
         except Exception as e:
             logger.error("Error finalizing events: %s", e)
@@ -1030,17 +1070,18 @@ class NLCalendarCreator(QMainWindow):
         Returns:
             Tuple of (merged ICS content, number of events built, warnings).
         """
-        from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_strings
+        from eventcalendar.core.ics_builder import build_ics_batch, combine_ics_strings
 
-        ics_strings, warnings = build_ics_from_events(events)
+        result = build_ics_batch(events)
 
-        if not ics_strings:
+        if not result.ics_strings:
             raise ValueError("Failed to create ICS files from event data")
 
+        warnings = [*result.skipped_events, *result.warnings]
         if warnings:
             logger.warning("ICS warnings:\n%s", "\n".join(warnings))
 
-        return combine_ics_strings(ics_strings), len(ics_strings), warnings
+        return combine_ics_strings(result.ics_strings), len(result.ics_strings), warnings
 
     def _open_in_calendar(
         self,
@@ -1073,16 +1114,13 @@ class NLCalendarCreator(QMainWindow):
             suffix=".ics"
         ) as tf:
             tf.write(content.encode('utf-8'))
+            self._temp_ics_paths.add(tf.name)
             return tf.name
 
     def _launch_calendar_app(self, file_path: str) -> None:
-        """Platform-specific calendar app launch."""
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", file_path], start_new_session=True)
-        elif sys.platform.startswith("win"):
-            os.startfile(file_path)
-        else:
-            subprocess.Popen(["xdg-open", file_path], start_new_session=True)
+        """Ask the desktop to open the ICS file and verify it accepted the request."""
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(file_path)):
+            raise OSError("The operating system did not accept the calendar file")
 
     def _show_success(
         self,
@@ -1092,9 +1130,8 @@ class NLCalendarCreator(QMainWindow):
     ) -> None:
         """Report the outcome of event creation in the status bar.
 
-        Skipped events produce a persistent notice (kept until the next status
-        message) and the inputs are preserved so the user can retry; clean runs
-        keep the short transient toast.
+        Inputs are cleared after the OS accepts the import request.  This avoids
+        duplicate imports after a partial success; skipped items can be re-entered.
         """
         requested = requested_count if requested_count is not None else created_count
         warnings = warnings or []
@@ -1104,22 +1141,23 @@ class NLCalendarCreator(QMainWindow):
             detail = warnings[0] if warnings else "see log for details"
             more = f" (+{len(warnings) - 1} more, see log)" if len(warnings) > 1 else ""
             self._show_transient_notice(
-                f"Added {created_count} of {requested} events - "
-                f"{skipped} skipped: {detail}{more}",
+                f"Opened {created_count} of {requested} events for import - "
+                f"{skipped} skipped: {detail}{more}. Re-enter skipped events only.",
                 timeout_ms=0,
             )
+            self._clear_inputs()
             return
 
         if warnings:
             more = f" (+{len(warnings) - 1} more)" if len(warnings) > 1 else ""
             noun = "Event" if created_count == 1 else f"{created_count} events"
-            message = f"{noun} created with warning: {warnings[0]}{more}"
+            message = f"{noun} opened for import with warning: {warnings[0]}{more}"
             timeout_ms = 10000
         elif created_count == 1:
-            message = "Event created successfully!"
+            message = "Event opened for calendar import."
             timeout_ms = 5000
         else:
-            message = f"{created_count} events created successfully!"
+            message = f"{created_count} events opened for calendar import."
             timeout_ms = 5000
 
         self._show_transient_notice(message, timeout_ms=timeout_ms)
@@ -1130,6 +1168,9 @@ class NLCalendarCreator(QMainWindow):
         def cleanup():
             try:
                 os.unlink(file_path)
+                self._temp_ics_paths.discard(file_path)
+            except FileNotFoundError:
+                self._temp_ics_paths.discard(file_path)
             except Exception as e:
                 logger.warning("Failed to delete temp file: %s", e)
 
@@ -1139,8 +1180,30 @@ class NLCalendarCreator(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Handle window close event."""
-        # Shutdown thread pool
-        self._executor.shutdown(wait=False)
+        self._closing = True
+        self._cancel_event.set()
+        with self._threads_lock:
+            for future in self._active_futures:
+                cancel = getattr(future, "cancel", None)
+                if cancel is not None:
+                    cancel()
+        self.image_area.reset_state()
+        for temp_path in list(self._temp_ics_paths):
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                logger.warning("Failed to delete temp ICS file %s: %s", temp_path, exc)
+            finally:
+                self._temp_ics_paths.discard(temp_path)
+        with self._api_client_lock:
+            if self.api_client is not None:
+                try:
+                    self.api_client.close()
+                except Exception:
+                    logger.debug("API client close failed", exc_info=True)
+        self._executor.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
 
     # --- Backward Compatibility ---
@@ -1148,19 +1211,15 @@ class NLCalendarCreator(QMainWindow):
     def parse_event_text(self, text: str) -> Dict[str, Optional[str]]:
         """Parse event text (backward compatibility wrapper).
 
-        Uses the module-level datetime for monkeypatching compatibility.
+        Uses the packaged implementation and has no checkout-root dependency.
         """
-        # Import datetime from the module that created this instance
-        # This allows tests to monkeypatch Calender.datetime
-        import Calender
-        ref_date = Calender.datetime.now()
+        ref_date = datetime.now()
         return parse_event_text(text, reference_date=ref_date)
 
     def format_date_display(self, date_str: str) -> Optional[str]:
         """Format date for display (backward compatibility wrapper).
 
-        Uses the module-level datetime for monkeypatching compatibility.
+        Uses the packaged implementation and has no checkout-root dependency.
         """
-        import Calender
-        ref_date = Calender.datetime.now()
+        ref_date = datetime.now()
         return format_date_display(date_str, reference_date=ref_date)

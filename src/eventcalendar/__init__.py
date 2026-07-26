@@ -16,7 +16,21 @@ from eventcalendar.exceptions.errors import (
 )
 from eventcalendar.core.api_client import CalendarAPIClient
 from eventcalendar.core.event_model import CalendarEvent
-from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_strings
+from eventcalendar.core.ics_builder import (
+    ICSBatchResult,
+    build_ics_batch,
+    build_ics_from_events,
+    combine_ics_strings,
+)
+
+
+def __getattr__(name: str):
+    """Lazily expose the GUI class without importing PyQt during core use."""
+    if name == "NLCalendarCreator":
+        from eventcalendar.ui.main_window import NLCalendarCreator
+
+        return NLCalendarCreator
+    raise AttributeError(name)
 
 __all__ = [
     # Version
@@ -32,5 +46,8 @@ __all__ = [
     "CalendarAPIClient",
     "CalendarEvent",
     "build_ics_from_events",
+    "build_ics_batch",
+    "ICSBatchResult",
     "combine_ics_strings",
+    "NLCalendarCreator",
 ]

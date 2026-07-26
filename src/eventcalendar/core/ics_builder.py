@@ -24,6 +24,7 @@ from eventcalendar.core.timezone_utils import (
     attach_timezone_with_warnings,
     extract_timezone_from_time_string,
 )
+from eventcalendar.core.event_model import CalendarEvent
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,16 @@ class DateTimeResult:
     start_utc: datetime
     end_utc: datetime
     warning: Optional[str] = None
+
+
+@dataclass
+class ICSBatchResult:
+    """Structured result for a multi-event build."""
+
+    ics_strings: List[str]
+    created_events: List[Dict]
+    skipped_events: List[str]
+    warnings: List[str]
 
 
 # Required fields for event validation. "uid" and "timezone" are not listed:
@@ -67,22 +78,47 @@ def build_ics_from_events(events: list) -> Tuple[List[str], List[str]]:
     Returns:
         Tuple of (ics_strings, warnings).
     """
-    events = _normalize_events_input(events)
+    result = build_ics_batch(events)
+    return result.ics_strings, [*result.skipped_events, *result.warnings]
 
-    ics_strings = []
-    warnings = []
 
-    for i, event_dict in enumerate(events):
-        result = _build_single_event_ics(event_dict, i)
-        if result.success:
+def build_ics_batch(events) -> ICSBatchResult:
+    """Validate and build each event without allowing one bad item to crash a batch."""
+    normalized = _normalize_events_input(events)
+    ics_strings: List[str] = []
+    created_events: List[Dict] = []
+    skipped_events: List[str] = []
+    warnings: List[str] = []
+
+    if normalized is None:
+        return ICSBatchResult([], [], ["Event payload must be an object or a list of objects."], [])
+
+    for index, raw_event in enumerate(normalized):
+        if not isinstance(raw_event, dict):
+            skipped_events.append(
+                f"Skipping event {index + 1} - expected an object, got {type(raw_event).__name__}."
+            )
+            continue
+        try:
+            event_dict = CalendarEvent.from_dict(raw_event).to_dict()
+        except Exception as exc:
+            title = raw_event.get("title") or f"Event {index + 1}"
+            skipped_events.append(f"Skipping '{title}' - {exc}")
+            continue
+
+        result = _build_single_event_ics(event_dict, index)
+        if result.success and result.ics_content is not None:
             ics_strings.append(result.ics_content)
-        if result.warning:
-            warnings.append(result.warning)
+            created_events.append(event_dict)
+            if result.warning:
+                warnings.append(result.warning)
+        elif result.warning:
+            skipped_events.append(result.warning)
 
-    return ics_strings, warnings
+    return ICSBatchResult(ics_strings, created_events, skipped_events, warnings)
 
 
-def _normalize_events_input(events) -> List[Dict]:
+def _normalize_events_input(events) -> Optional[List]:
     """Ensure events is a list of dicts.
 
     Args:
@@ -95,7 +131,7 @@ def _normalize_events_input(events) -> List[Dict]:
         return [events]
     if not isinstance(events, list):
         logger.error("Expected a list of events, but got %s", type(events))
-        return []
+        return None
     return events
 
 
@@ -179,9 +215,9 @@ def _parse_all_day_dates(event_dict: Dict) -> Tuple[date, date]:
     Raises:
         ValueError: If the end date is before the start date.
     """
-    start_day = parser.parse(event_dict["date"]).date()
+    start_day = date.fromisoformat(event_dict["date"])
     end_date_raw = event_dict.get("end_date")
-    last_day = parser.parse(end_date_raw).date() if end_date_raw else start_day
+    last_day = date.fromisoformat(end_date_raw) if end_date_raw else start_day
     if last_day < start_day:
         raise ValueError(
             f"All-day end date ({last_day.isoformat()}) is before start date "
@@ -206,9 +242,9 @@ def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
         warnings: List[str] = []
 
         # Parse the date first
-        event_date = parser.parse(event_dict["date"]).date()
+        event_date = date.fromisoformat(event_dict["date"])
         end_date_raw = event_dict.get("end_date") or event_dict.get("date")
-        end_date = parser.parse(end_date_raw).date()
+        end_date = date.fromisoformat(end_date_raw)
 
         # Parse start and end times
         start_time_str_raw = normalize_time_string(event_dict["start_time"])
@@ -216,6 +252,7 @@ def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
 
         base_tz_str = event_dict.get("timezone", "local") or "local"
         start_tz_str = event_dict.get("start_timezone") or base_tz_str
+        explicit_end_timezone = bool(event_dict.get("end_timezone"))
         end_tz_str = event_dict.get("end_timezone") or start_tz_str
 
         # If the LLM embedded timezone in time strings, prefer that.
@@ -225,6 +262,10 @@ def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
             start_tz_str = start_tz_from_time
         if end_tz_from_time:
             end_tz_str = end_tz_from_time
+        elif not explicit_end_timezone:
+            # An embedded start zone becomes the event's effective zone unless
+            # the user explicitly supplied a different end zone.
+            end_tz_str = start_tz_str
 
         # Resolve start/end timezones separately (supports travel "timezone jumps")
         event_title = event_dict.get("title")
@@ -269,10 +310,12 @@ def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
 
             naive_duration = end_dt_naive - start_dt_naive
 
-            # Zero-duration input: the LLM echoed the start time as the end time
+            same_timezone = tz_key(start_tz) == tz_key(end_tz)
+
+            # Zero-duration input in one timezone: the LLM echoed the start time
             # (only a start time was stated). Assume a 1-hour event rather than
             # rolling the end date forward into a full 24-hour block.
-            if naive_duration == timedelta(0):
+            if naive_duration == timedelta(0) and same_timezone:
                 candidate_end_dt = start_dt + timedelta(hours=1)
                 if hasattr(end_tz, "normalize"):
                     candidate_end_dt = end_tz.normalize(candidate_end_dt)
@@ -283,7 +326,7 @@ def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
             # DST edge cases can make an end time appear to be <= start time even when the
             # user provided a positive wall-time duration (e.g. 02:30–03:30 on spring-forward).
             # In that case, preserve the naive duration rather than rolling the end date.
-            if naive_duration > timedelta(0) and tz_key(start_tz) == tz_key(end_tz):
+            if naive_duration > timedelta(0) and same_timezone:
                 candidate_end_dt = start_dt + naive_duration
                 if hasattr(end_tz, "normalize"):
                     candidate_end_dt = end_tz.normalize(candidate_end_dt)

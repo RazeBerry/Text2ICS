@@ -448,10 +448,19 @@ def test_worker_initializes_client_and_handles_empty_events(
         def __init__(self, api_key: str):
             self.api_key = api_key
 
-        def get_event_data(self, event_description: str, image_data: list[Any], status_callback: Any) -> list[Any]:
+        def extract_events(
+            self,
+            event_description: str,
+            image_data: list[Any],
+            status_callback: Any,
+            cancel_event: Any,
+        ) -> Any:
+            from eventcalendar.core.api_client import ExtractionResult
+
             assert event_description == "demo"
             assert image_data == []
-            return []
+            assert not cancel_event.is_set()
+            return ExtractionResult([])
 
     monkeypatch.setattr(api_client_module, "CalendarAPIClient", FakeClient)
     window.api_client = None
@@ -480,8 +489,13 @@ def test_build_merged_ics_uses_non_blocking_warning_notice(
 
     monkeypatch.setattr(
         ics_builder_module,
-        "build_ics_from_events",
-        lambda events: (["BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"], ["Timezone fallback used"]),
+        "build_ics_batch",
+        lambda events: ics_builder_module.ICSBatchResult(
+            ["BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"],
+            events,
+            [],
+            ["Timezone warning"],
+        ),
     )
     monkeypatch.setattr(ics_builder_module, "combine_ics_strings", lambda parts: parts[0])
 
@@ -493,7 +507,7 @@ def test_build_merged_ics_uses_non_blocking_warning_notice(
 
     assert merged.startswith("BEGIN:VCALENDAR")
     assert created_count == 1
-    assert warnings == ["Timezone fallback used"]
+    assert warnings == ["Timezone warning"]
 
     window._clear_inputs = lambda: None  # type: ignore[assignment]
     window._show_success(created_count, 1, warnings)
@@ -517,10 +531,10 @@ def test_show_success_reports_skipped_events_persistently(qt_app: Any) -> None:
 
     assert notices
     message, timeout_ms = notices[0]
-    assert message.startswith("Added 3 of 5 events")
+    assert message.startswith("Opened 3 of 5 events for import")
     assert "2 skipped" in message
     assert timeout_ms == 0  # persistent until the next status message replaces it
-    assert cleared == []  # inputs preserved so the user can retry
+    assert cleared == [True]  # prevents a retry from duplicating successful imports
     window.close()
 
 
@@ -541,7 +555,7 @@ def test_show_success_uses_non_blocking_notice(qt_app: Any, monkeypatch: pytest.
     monkeypatch.setattr(QMessageBox, "information", fail_if_modal)
     window._show_success(2)
 
-    assert notices == ["2 events created successfully!"]
+    assert notices == ["2 events opened for calendar import."]
     assert cleared == [True]
     window.close()
 
@@ -552,8 +566,9 @@ def test_image_area_click_dialog_selects_image(qt_app: Any, monkeypatch: pytest.
     from PyQt6.QtWidgets import QFileDialog
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        tmp.write(b"not-a-real-png-but-ok-for-copy")
         image_path = tmp.name
+    from PIL import Image
+    Image.new("RGB", (8, 8), "white").save(image_path, format="PNG")
 
     area = ImageAttachmentArea()
     try:
@@ -566,6 +581,65 @@ def test_image_area_click_dialog_selects_image(qt_app: Any, monkeypatch: pytest.
         area.close()
     finally:
         os.unlink(image_path)
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_image_area_rejects_spoofed_extension(qt_app: Any) -> None:
+    from eventcalendar.ui.widgets.image_area import ImageAttachmentArea
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp.write(b"not-an-image")
+        image_path = tmp.name
+    area = ImageAttachmentArea()
+    try:
+        assert area._create_payload_from_url(image_path) is None
+        assert area.image_data == []
+    finally:
+        area.close()
+        os.unlink(image_path)
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_api_key_is_hidden_until_user_reveals_it(qt_app: Any) -> None:
+    from PyQt6.QtWidgets import QLineEdit
+    from eventcalendar.ui.widgets.api_key_dialog import APIKeySetupDialog
+
+    dialog = APIKeySetupDialog()
+    try:
+        assert dialog.api_key_input.echoMode() == QLineEdit.EchoMode.Password
+        dialog.reveal_key_checkbox.setChecked(True)
+        assert dialog.api_key_input.echoMode() == QLineEdit.EchoMode.Normal
+    finally:
+        dialog.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_close_cancels_work_closes_client_and_removes_temp_ics(qt_app: Any) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+
+    window = NLCalendarCreator()
+    cancelled: list[bool] = []
+    closed: list[bool] = []
+
+    class FakeFuture:
+        def cancel(self) -> None:
+            cancelled.append(True)
+
+    class FakeClient:
+        def close(self) -> None:
+            closed.append(True)
+
+    with tempfile.NamedTemporaryFile(suffix=".ics", delete=False) as tmp:
+        temp_path = tmp.name
+    window._active_futures.add(FakeFuture())
+    window.api_client = FakeClient()
+    window._temp_ics_paths.add(temp_path)
+    window.close()
+
+    assert cancelled == [True]
+    assert closed == [True]
+    assert not os.path.exists(temp_path)
+    assert window._cancel_event.is_set()
 
 
 @pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")

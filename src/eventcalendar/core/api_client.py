@@ -1,94 +1,75 @@
-"""Gemini API client for calendar event extraction."""
+"""Gemini API client for validated calendar-event extraction."""
+
+from __future__ import annotations
 
 import json
 import logging
 import os
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from string import Formatter
 from typing import Callable, Dict, List, Optional, Tuple
 
-from eventcalendar.config.settings import API_CONFIG
 from eventcalendar.config.constants import (
     STATUS_ATTEMPTING,
-    STATUS_SUCCESS,
     STATUS_MAX_RETRIES,
-    STATUS_FAILED,
+    STATUS_SUCCESS,
 )
-from eventcalendar.exceptions.errors import CalendarAPIError, RetryExhaustedError
-from eventcalendar.core.retry import is_retryable_error, wrap_api_key_error, is_api_key_error
-from eventcalendar.core.ics_builder import build_ics_from_events
+from eventcalendar.config.settings import API_CONFIG
+from eventcalendar.core.event_model import CalendarEvent
+from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_strings
 from eventcalendar.core.image_preprocessing import preprocess_image_for_upload
+from eventcalendar.core.retry import is_api_key_error, is_retryable_error, wrap_api_key_error
+from eventcalendar.exceptions.errors import (
+    APIResponseError,
+    CalendarAPIError,
+    ImageProcessingError,
+    RetryExhaustedError,
+)
 from eventcalendar.utils.masking import mask_key
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ExtractionResult:
+    """Validated extraction output plus non-fatal attachment warnings."""
+
+    events: List[Dict]
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class UploadedImageBatch:
+    """Remote uploads retained until generation is complete."""
+
+    files: List[object] = field(default_factory=list)
+    failures: List[str] = field(default_factory=list)
+
+
 class CalendarAPIClient:
-    """Client for interacting with Google's Gemini API to extract calendar events."""
+    """Per-instance client for Google's supported ``google-genai`` SDK."""
 
-    # System prompt for the LLM
     SYSTEM_PROMPT = """
-Follow these steps to extract event details and return them as a JSON array:
+Extract every distinct calendar event from the text and images.
 
-1. Carefully parse the event details (text and any image context) to identify if multiple distinct events are described. If so, process each one separately.
-
-2. For each event, extract all relevant information such as event title, date, time, location, and description.
-
-   **IMPORTANT TIME HANDLING**:
-   - "start_time" and "end_time" MUST each contain a SINGLE clock time (e.g., "3 PM", "19:30"), NEVER a range. If the input says "7-9pm", set start_time to "7:00 PM" and end_time to "9:00 PM".
-   - Keep time strings free of timezone and date information - timezone info belongs in the timezone fields (see below)
-   - Do NOT attempt timezone conversions - preserve the original wall-clock time as stated
-   - If no timezone is specified, assume it's in the user's local timezone ("local")
-   - If end time is not specified, estimate a reasonable duration (e.g., 1 hour for meetings, 2-3 hours for dinners)
-   - For all-day events with no specific times (festivals, holidays, deadlines), set "all_day": true and omit start_time/end_time
-   - If an event "jumps" time zones (e.g., flights), you MAY provide different start/end timezones (and end_date if needed)
-
-   **IMPORTANT DATE HANDLING**:
-   - "date" and "end_date" MUST be in ISO format: YYYY-MM-DD
-   - For relative dates like "tomorrow", "next Friday", calculate based on the provided current date
-   - If a date has no year (e.g., a flyer saying "March 30"), use the next FUTURE occurrence relative to the provided current date
-
-3. Return a **JSON array**, one object per event.
-   Keys REQUIRED per event:
-     - "uid"          : stable unique string (use UUID if needed, no @domain required)
-     - "title"        : human title
-     - "start_time"   : single time string (e.g., "7:30 PM", "19:30"); omit when "all_day" is true
-     - "end_time"     : single time string, extracted or estimated (e.g., "9:00 PM", "21:30"); omit when "all_day" is true
-     - "date"         : ISO date string (e.g., "2026-08-15")
-     - "timezone"     : timezone if explicitly mentioned, otherwise "local"
-     - "description"  : plain text (no special escaping needed)
-     - "location"     : plain text address or venue name, or "" if none provided
-
-   Optional keys (use when helpful, especially for travel / time-zone jumps):
-     - "all_day"       : true for events without specific times; use "end_date" for multi-day all-day events
-     - "start_timezone": timezone for the start time (IANA like "America/Los_Angeles", an abbreviation like "PDT", or "local")
-     - "end_timezone"  : timezone for the end time (IANA like "America/New_York", an abbreviation like "EDT", or "local")
-     - "end_date"      : ISO end date (YYYY-MM-DD) if different from "date"
-
-   Example JSON Output:
-   ```json
-   [
-     {
-       "uid": "uuid-some-unique-id-1",
-       "title": "Flight LA → NYC",
-       "start_time": "10:00 AM",
-       "end_time": "6:00 PM",
-       "date": "2026-08-15",
-       "timezone": "local",
-       "start_timezone": "America/Los_Angeles",
-       "end_timezone": "America/New_York",
-       "description": "Depart LAX, arrive JFK.",
-       "location": "LAX → JFK"
-     }
-   ]
-   ```
-
-4. Ensure the output is ONLY the JSON array, with no introductory text or explanations.
+Return a JSON array and nothing else. For each event:
+- title, date, timezone, description, location, and all_day are required.
+- date/end_date use YYYY-MM-DD.
+- start_time/end_time each contain one clock time, never a range or date.
+- omit start_time/end_time only when all_day is true.
+- preserve stated wall-clock times; never convert them.
+- use "local" when no timezone is stated.
+- use an IANA timezone or numeric UTC offset when an abbreviation is ambiguous.
+- start_timezone/end_timezone and end_date may describe travel across zones/dates.
+- estimate a reasonable end time when only a start time is given.
+- uid may be omitted; the application will create one.
 """
 
-    # Template for user prompts (with dynamic placeholders)
     USER_PROMPT_TEMPLATE = """
 <event_description>
 {event_description}
@@ -98,154 +79,152 @@ Today's date is {day_name}, {formatted_date}.
 Current timezone: {user_timezone}
 """
 
+    RESPONSE_JSON_SCHEMA = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "uid": {"type": "string"},
+                "title": {"type": "string"},
+                "start_time": {"type": "string"},
+                "end_time": {"type": "string"},
+                "date": {"type": "string"},
+                "end_date": {"type": "string"},
+                "timezone": {"type": "string"},
+                "start_timezone": {"type": "string"},
+                "end_timezone": {"type": "string"},
+                "description": {"type": "string"},
+                "location": {"type": "string"},
+                "all_day": {"type": "boolean"},
+            },
+            "required": ["title", "date", "timezone", "description", "location", "all_day"],
+            "additionalProperties": False,
+        },
+    }
+
     def __init__(self, api_key: str):
-        """Initialize the API client with the given API key.
+        from google import genai
+        from google.genai import types
 
-        Args:
-            api_key: The Gemini API key.
-        """
-        # Import genai here for lazy loading
-        import google.generativeai as genai
-        self.genai = genai
-        self.api_key = api_key
         self.api_key_masked = mask_key(api_key)
-
-        # Configure the API key
-        self.genai.configure(api_key=api_key)
-
-        # Use configuration from settings
-        self.generation_config = {
-            "temperature": API_CONFIG.temperature,
-            "top_p": API_CONFIG.top_p,
-            "top_k": API_CONFIG.top_k,
-            "max_output_tokens": API_CONFIG.max_output_tokens,
-            "response_mime_type": "text/plain",
-        }
-
-        # Validate template keys
-        self._validate_prompt_template()
-
-        # Initialize the model
-        self.model = self.genai.GenerativeModel(
-            model_name=API_CONFIG.model_name,
-            generation_config=self.generation_config,
-            system_instruction=self.SYSTEM_PROMPT
-        )
-
-        # Retry configuration
         self.base_delay = API_CONFIG.base_delay
         self.max_retries = API_CONFIG.max_retries
         self.timeout_seconds = API_CONFIG.timeout_seconds
+        self._closed = False
+        self._close_lock = threading.Lock()
+        self._types = types
+
+        self._validate_prompt_template()
+        http_options = types.HttpOptions(
+            timeout=max(1, int(self.timeout_seconds * 1000)),
+            # The app owns retry policy and status reporting; avoid nested retries.
+            retry_options=types.HttpRetryOptions(attempts=1),
+        )
+        self.client = genai.Client(api_key=api_key, http_options=http_options)
+        self.generation_config = types.GenerateContentConfig(
+            system_instruction=self.SYSTEM_PROMPT,
+            temperature=API_CONFIG.temperature,
+            top_p=API_CONFIG.top_p,
+            top_k=API_CONFIG.top_k,
+            max_output_tokens=API_CONFIG.max_output_tokens,
+            response_mime_type="application/json",
+            response_json_schema=self.RESPONSE_JSON_SCHEMA,
+        )
 
     def _validate_prompt_template(self) -> None:
-        """Validate that the prompt template has required keys."""
-        template_keys = [
-            fn for _, fn, _, _ in Formatter().parse(self.USER_PROMPT_TEMPLATE) if fn
-        ]
-        required_keys = {'event_description', 'day_name', 'formatted_date', 'user_timezone'}
-        found_keys = set(template_keys)
-        if found_keys != required_keys:
-            raise ValueError(
-                f"Template mismatch! Expected keys {required_keys} but got {found_keys}"
-            )
+        template_keys = {fn for _, fn, _, _ in Formatter().parse(self.USER_PROMPT_TEMPLATE) if fn}
+        required = {"event_description", "day_name", "formatted_date", "user_timezone"}
+        if template_keys != required:
+            raise ValueError(f"Template mismatch! Expected keys {required} but got {template_keys}")
+
+    @staticmethod
+    def _notify(callback: Optional[Callable[[str], None]], message: str) -> None:
+        """Status observers are best-effort and never alter API control flow."""
+        if callback is None:
+            return
+        try:
+            callback(message)
+        except Exception:
+            logger.debug("Status callback failed", exc_info=True)
+
+    @staticmethod
+    def _check_cancelled(cancel_event: Optional[threading.Event]) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError("Event extraction was cancelled")
 
     def upload_to_gemini(self, path: str, mime_type: Optional[str] = None):
-        """Upload a file to Gemini.
-
-        Args:
-            path: Path to the file to upload.
-            mime_type: Optional MIME type of the file.
-
-        Returns:
-            The uploaded file object.
-
-        Raises:
-            FileNotFoundError: If the file doesn't exist.
-            CalendarAPIError: If there's an API key error.
-        """
-        if not os.path.exists(path):
-            logger.error("File not found for upload: %s", path)
+        """Upload one verified file through this client's credential boundary."""
+        if not os.path.isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
+        try:
+            return self.client.files.upload(
+                file=path,
+                config=self._types.UploadFileConfig(mime_type=mime_type),
+            )
+        except Exception as exc:
+            logger.warning("Image upload failed for %s: %s", Path(path).name, exc)
+            if is_api_key_error(exc):
+                raise wrap_api_key_error(exc, self.api_key_masked) from exc
+            raise
+
+    def extract_events(
+        self,
+        event_description: str,
+        image_data: List[Tuple[str, str, Optional[str]]],
+        status_callback: Optional[Callable[[str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> ExtractionResult:
+        """Extract and validate events, cleaning every remote upload on exit."""
+        self._check_cancelled(cancel_event)
+        if self._closed:
+            raise CalendarAPIError("API client is closed")
+
+        prompt = self._build_prompt(event_description)
+        if image_data:
+            self._notify(status_callback, f"Preparing {len(image_data)} image(s)...")
+
+        batch = self._prepare_images(image_data, cancel_event)
+        warnings = list(batch.failures)
+        if image_data and not batch.files:
+            reason = "; ".join(batch.failures) or "no valid image could be uploaded"
+            raise ImageProcessingError("attachments", reason)
+        if warnings:
+            self._notify(status_callback, f"Continuing with {len(batch.files)} image(s); {len(warnings)} failed.")
 
         try:
-            file = self.genai.upload_file(path, mime_type=mime_type)
-            logger.debug("Uploaded file '%s' as: %s", file.display_name, file.uri)
-            return file
-        except Exception as e:
-            logger.error("Error uploading file %s: %s", path, e)
-            if is_api_key_error(e):
-                raise wrap_api_key_error(e, self.api_key_masked) from e
-            raise
+            for attempt in range(self.max_retries):
+                self._check_cancelled(cancel_event)
+                self._notify(
+                    status_callback,
+                    STATUS_ATTEMPTING.format(attempt=attempt + 1, max_retries=self.max_retries),
+                )
+                try:
+                    response_text = self._call_api(prompt, batch.files)
+                    events = self._parse_response(response_text)
+                    self._notify(status_callback, STATUS_SUCCESS.format(count=len(events)))
+                    return ExtractionResult(events=events, warnings=warnings)
+                except (CalendarAPIError, CancelledError):
+                    raise
+                except Exception as exc:
+                    if not self._handle_retry(exc, attempt, status_callback, cancel_event):
+                        raise
+        finally:
+            self._delete_remote_files(batch.files)
+
+        raise RetryExhaustedError(self.max_retries)
 
     def get_event_data(
         self,
         event_description: str,
         image_data: List[Tuple[str, str, Optional[str]]],
-        status_callback: Callable[[str], None]
-    ) -> Optional[List[Dict]]:
-        """Get event data from the LLM without building ICS files.
-
-        Args:
-            event_description: Natural language description of the event(s).
-            image_data: List of (file_path, mime_type, base64_data) tuples (base64 unused).
-            status_callback: Callback function for status updates.
-
-        Returns:
-            List of event dictionaries, or None if extraction failed.
-
-        Raises:
-            CalendarAPIError: If there's a permanent API error.
-            RetryExhaustedError: If all retries are exhausted.
-        """
-        prompt = self._build_prompt(event_description)
-
-        if image_data:
-            try:
-                status_callback(f"Preparing {len(image_data)} image(s)...")
-            except Exception:
-                pass
-        history = self._prepare_image_history(image_data)
-
-        for attempt in range(self.max_retries):
-            try:
-                status_callback(
-                    STATUS_ATTEMPTING.format(
-                        attempt=attempt + 1,
-                        max_retries=self.max_retries
-                    )
-                )
-                logger.debug("Attempt %d/%d", attempt + 1, self.max_retries)
-
-                response_text = self._call_api(prompt, history)
-                events = self._parse_response(response_text)
-
-                logger.debug("Successfully parsed %d event(s).", len(events))
-                status_callback(STATUS_SUCCESS.format(count=len(events)))
-                return events
-
-            except CalendarAPIError:
-                # Don't retry permanent failures
-                raise
-            except Exception as e:
-                if not self._handle_retry(e, attempt, status_callback):
-                    raise
-
-        logger.debug("Failed to create calendar event after retries.")
-        status_callback(STATUS_FAILED)
-        return None
+        status_callback: Callable[[str], None],
+    ) -> List[Dict]:
+        """Backward-compatible list-returning extraction helper."""
+        return self.extract_events(event_description, image_data, status_callback).events
 
     def _build_prompt(self, event_description: str) -> str:
-        """Build the user prompt with current date context.
-
-        Args:
-            event_description: The event description from the user.
-
-        Returns:
-            The formatted prompt string.
-        """
         if not event_description:
             event_description = "Event details are provided via attached images."
-
         current_date = datetime.now()
         try:
             import tzlocal
@@ -260,162 +239,64 @@ Current timezone: {user_timezone}
             user_timezone=user_timezone,
         )
 
-    def _prepare_image_history(
+    def _prepare_images(
         self,
-        image_data: List[Tuple[str, str, Optional[str]]]
-    ) -> List[Dict]:
-        """Upload images and prepare chat history.
-
-        Args:
-            image_data: List of (file_path, mime_type, base64_data) tuples.
-
-        Returns:
-            Chat history list for the API call.
-        """
-        if not image_data:
-            return []
-
-        candidates: List[Tuple[int, str, str]] = []
-        for index, (file_path, mime_type, _) in enumerate(image_data):
-            if not file_path:
-                continue
-            if not os.path.exists(file_path):
-                logger.warning("Image path does not exist: %s", file_path)
-                continue
-            candidates.append((index, file_path, mime_type))
-
-        if not candidates:
-            return []
-
-        raw_workers = os.environ.get("EVENTCALENDAR_UPLOAD_WORKERS", "3")
+        image_data: List[Tuple[str, str, Optional[str]]],
+        cancel_event: Optional[threading.Event],
+    ) -> UploadedImageBatch:
+        batch = UploadedImageBatch()
         try:
-            configured_workers = int(raw_workers)
-        except ValueError:
-            configured_workers = 3
+            for file_path, mime_type, _unused_base64 in image_data:
+                self._check_cancelled(cancel_event)
+                if not file_path:
+                    batch.failures.append("An attachment had no file path.")
+                    continue
+                try:
+                    processed = preprocess_image_for_upload(file_path, mime_type)
+                    try:
+                        uploaded = self.upload_to_gemini(processed.path, processed.mime_type)
+                        batch.files.append(uploaded)
+                    finally:
+                        processed.cleanup()
+                except CalendarAPIError:
+                    raise
+                except Exception as exc:
+                    reason = getattr(exc, "reason", str(exc))
+                    batch.failures.append(f"{Path(file_path).name}: {reason}")
+            return batch
+        except Exception:
+            self._delete_remote_files(batch.files)
+            batch.files.clear()
+            raise
 
-        max_workers = max(1, min(configured_workers, len(candidates), 8))
-
-        def preprocess_and_upload(index: int, file_path: str, mime_type: str):
-            processed = preprocess_image_for_upload(file_path, mime_type)
+    def _delete_remote_files(self, uploaded_files: List[object]) -> None:
+        for uploaded in uploaded_files:
+            name = getattr(uploaded, "name", None)
+            if not name:
+                continue
             try:
-                uploaded = self.upload_to_gemini(processed.path, mime_type=processed.mime_type)
-                return index, uploaded
-            finally:
-                processed.cleanup()
+                self.client.files.delete(name=name)
+            except Exception as exc:
+                logger.warning("Failed to delete remote upload %s: %s", name, exc)
 
-        results: List[Tuple[int, object]] = []
-
-        if max_workers == 1 or len(candidates) == 1:
-            for index, file_path, mime_type in candidates:
-                try:
-                    results.append(preprocess_and_upload(index, file_path, mime_type))
-                except CalendarAPIError:
-                    raise
-                except Exception as e:
-                    logger.warning("Failed to upload image %s: %s", file_path, e)
-        else:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(preprocess_and_upload, index, file_path, mime_type): (index, file_path, mime_type)
-                    for index, file_path, mime_type in candidates
-                }
-                failed: List[Tuple[int, str, str]] = []
-                try:
-                    for future in as_completed(futures):
-                        index, file_path, mime_type = futures[future]
-                        try:
-                            results.append(future.result())
-                        except CalendarAPIError:
-                            for pending in futures:
-                                pending.cancel()
-                            raise
-                        except Exception as e:
-                            logger.warning("Failed to upload image %s: %s", file_path, e)
-                            failed.append((index, file_path, mime_type))
-                finally:
-                    # Ensure all futures complete/cancel before returning.
-                    for pending in futures:
-                        pending.cancel()
-
-            # Safety net: if some parallel uploads failed, retry those sequentially.
-            for index, file_path, mime_type in failed:
-                try:
-                    results.append(preprocess_and_upload(index, file_path, mime_type))
-                except CalendarAPIError:
-                    raise
-                except Exception as e:
-                    logger.warning("Retry upload failed for image %s: %s", file_path, e)
-
-        image_parts = [uploaded for _, uploaded in sorted(results, key=lambda item: item[0])]
-
-        if image_parts:
-            return [{"role": "user", "parts": image_parts}]
-        return []
-
-    def _call_api(self, prompt: str, history: List[Dict]) -> str:
-        """Make the API call and extract response text.
-
-        Args:
-            prompt: The user prompt.
-            history: Chat history with uploaded images.
-
-        Returns:
-            The response text from the API.
-
-        Raises:
-            ValueError: If the response is empty.
-            CalendarAPIError: If there's an API key error.
-        """
-        logger.debug("Generated API prompt (first 200 chars): %s", prompt[:200])
-
-        chat = self.model.start_chat(history=history)
-        message = chat.send_message(prompt)
-
-        response_text = self._extract_text(message)
+    def _call_api(self, prompt: str, uploaded_files: List[object]) -> str:
+        logger.debug(
+            "Sending extraction request (prompt_chars=%d, attachments=%d)",
+            len(prompt),
+            len(uploaded_files),
+        )
+        response = self.client.models.generate_content(
+            model=API_CONFIG.model_name,
+            contents=[prompt, *uploaded_files],
+            config=self.generation_config,
+        )
+        response_text = getattr(response, "text", None)
         if not response_text:
-            logger.debug("Received empty response from API.")
             raise ValueError("Received empty response from API")
-
-        logger.debug("Raw API Response: %s", response_text)
+        logger.debug("Received extraction response (chars=%d)", len(response_text))
         return response_text
 
-    def _extract_text(self, message) -> Optional[str]:
-        """Extract text from API response message.
-
-        Args:
-            message: The API response message.
-
-        Returns:
-            The extracted text, or None if extraction failed.
-        """
-        response_text = getattr(message, 'text', None)
-        if response_text is not None:
-            return response_text
-
-        # Try to get text from parts
-        try:
-            if hasattr(message, 'parts') and message.parts:
-                return "".join(
-                    part.text for part in message.parts if hasattr(part, 'text')
-                )
-            return str(message)
-        except Exception as e:
-            logger.warning("Failed to extract text from message parts: %s", e)
-            return str(message)
-
     def _parse_response(self, response_text: str) -> List[Dict]:
-        """Parse JSON response into event list.
-
-        Args:
-            response_text: The raw response text.
-
-        Returns:
-            List of event dictionaries.
-
-        Raises:
-            ValueError: If JSON parsing fails.
-        """
-        # Remove potential markdown code block fences (Python 3.8 compatible).
         cleaned = response_text.strip()
         if cleaned.startswith("```"):
             first_newline = cleaned.find("\n")
@@ -423,106 +304,75 @@ Current timezone: {user_timezone}
             if cleaned.endswith("```"):
                 cleaned = cleaned[:-3]
             cleaned = cleaned.strip()
-
         try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            logger.debug("Failed to decode JSON: %s", e)
-            logger.debug("Received text was: %s", cleaned)
-            raise ValueError(f"LLM returned invalid JSON: {e}") from e
+            decoded = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise APIResponseError(f"LLM returned invalid JSON: {exc}") from exc
+        if not isinstance(decoded, list):
+            raise APIResponseError("LLM response must be a JSON array")
+
+        validated: List[Dict] = []
+        for index, raw_event in enumerate(decoded):
+            try:
+                validated.append(CalendarEvent.from_dict(raw_event).to_dict())
+            except Exception as exc:
+                raise APIResponseError(f"LLM event {index + 1} failed validation: {exc}") from exc
+        return validated
 
     def _handle_retry(
         self,
         error: Exception,
         attempt: int,
-        status_callback: Callable[[str], None]
+        status_callback: Optional[Callable[[str], None]],
+        cancel_event: Optional[threading.Event],
     ) -> bool:
-        """Handle retry logic for errors.
-
-        Args:
-            error: The exception that occurred.
-            attempt: Current attempt number (0-indexed).
-            status_callback: Callback for status updates.
-
-        Returns:
-            True if we should continue retrying, False otherwise.
-
-        Raises:
-            CalendarAPIError: If this is an API key error.
-            RetryExhaustedError: If max retries reached.
-        """
-        logger.debug(
-            "Exception on attempt %d: %s (%s)",
-            attempt + 1, error, type(error).__name__
-        )
-
-        # Check for API key errors
         if is_api_key_error(error):
             raise wrap_api_key_error(error, self.api_key_masked) from error
-
-        # Check if this error should be retried
         if not is_retryable_error(error):
-            logger.debug("Non-retryable error detected: %s", type(error).__name__)
-            status_callback(
-                f"Error: {type(error).__name__} - this error cannot be retried."
-            )
+            self._notify(status_callback, f"Error: {type(error).__name__} cannot be retried.")
             return False
-
         if attempt >= self.max_retries - 1:
-            logger.debug("Max retries reached. Raising exception.")
-            status_callback(STATUS_MAX_RETRIES)
-            raise RetryExhaustedError(
-                attempts=self.max_retries,
-                last_error=error
-            ) from error
+            self._notify(status_callback, STATUS_MAX_RETRIES)
+            raise RetryExhaustedError(self.max_retries, error) from error
 
-        # Calculate backoff delay
         delay = min(self.base_delay * (2 ** attempt), API_CONFIG.max_backoff)
-        status_callback(
-            f"Error occurred ({type(error).__name__}), retrying in {delay:.0f} seconds..."
+        self._notify(
+            status_callback,
+            f"Error occurred ({type(error).__name__}), retrying in {delay:.0f} seconds...",
         )
-        logger.debug("Retrying in %.0f seconds...", delay)
-        time.sleep(delay)
-
+        if cancel_event is not None:
+            if cancel_event.wait(delay):
+                raise CancelledError("Event extraction was cancelled")
+        else:
+            time.sleep(delay)
         return True
 
     def create_calendar_event(
         self,
         event_description: str,
         image_data: List[Tuple[str, str, Optional[str]]],
-        status_callback: Callable[[str], None]
+        status_callback: Callable[[str], None],
     ) -> str:
-        """Backwards-compatible helper that returns ICS text for the requested events.
-
-        Internally delegates to get_event_data and build_ics_from_events.
-
-        Args:
-            event_description: Natural language description of the event(s).
-            image_data: List of (file_path, mime_type, base64_data) tuples.
-            status_callback: Callback function for status updates.
-
-        Returns:
-            ICS content string.
-
-        Raises:
-            Exception: If event extraction or ICS building fails.
-        """
         events = self.get_event_data(event_description, image_data, status_callback)
         if not events:
-            raise Exception("API returned no event data.")
-
+            raise APIResponseError("API returned no event data")
         ics_strings, warnings = build_ics_from_events(events)
         if not ics_strings:
-            raise Exception("Failed to build ICS content from event data.")
-
+            raise APIResponseError("Failed to build ICS content from event data")
         if warnings:
-            warning_text = " | ".join(warnings)
-            try:
-                status_callback(f"Warnings: {warning_text}")
-            except Exception as e:
-                logger.warning(
-                    "Failed to send status callback for warnings: %s. Warnings: %s",
-                    e, warning_text
-                )
+            self._notify(status_callback, " | ".join(warnings))
+        return combine_ics_strings(ics_strings)
 
-        return "\r\n".join(ics_strings)
+    def close(self) -> None:
+        """Release the SDK HTTP client. Safe to call more than once."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.client.close()
+
+    def __enter__(self) -> "CalendarAPIClient":
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        self.close()

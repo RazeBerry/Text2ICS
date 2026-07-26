@@ -232,11 +232,11 @@ class TestCustomExceptions(unittest.TestCase):
 
     def test_timezone_resolution_error(self):
         """Verify TimezoneResolutionError stores timezone info."""
-        error = TimezoneResolutionError("XYZ", "UTC")
+        error = TimezoneResolutionError("XYZ", "unknown timezone")
         self.assertEqual(error.tz_name, "XYZ")
-        self.assertEqual(error.fallback, "UTC")
+        self.assertEqual(error.reason, "unknown timezone")
         self.assertIn("XYZ", str(error))
-        self.assertIn("UTC", str(error))
+        self.assertIn("unknown timezone", str(error))
 
     def test_event_validation_error(self):
         """Verify EventValidationError stores field info."""

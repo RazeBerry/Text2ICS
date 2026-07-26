@@ -1,9 +1,12 @@
 """User-friendly error message handling."""
 
 from eventcalendar.exceptions.errors import (
+    APIResponseError,
     CalendarAPIError,
-    RetryExhaustedError,
     EventValidationError,
+    ImageProcessingError,
+    RetryExhaustedError,
+    TimezoneResolutionError,
 )
 
 
@@ -30,11 +33,6 @@ def get_user_friendly_error(error: Exception) -> str:
     """
     error_str = str(error).lower()
 
-    # Check for specific error types first
-    if isinstance(error, CalendarAPIError):
-        if "api key" in error_str or "expired" in error_str or "invalid" in error_str:
-            return ERROR_MAPPINGS["api key"]
-
     if isinstance(error, RetryExhaustedError):
         return (
             f"Failed after multiple attempts. "
@@ -42,7 +40,20 @@ def get_user_friendly_error(error: Exception) -> str:
         )
 
     if isinstance(error, EventValidationError):
-        return f"Event data is incomplete: missing {', '.join(error.missing_fields)}"
+        return f"Event data is invalid: {error.reason}"
+
+    if isinstance(error, TimezoneResolutionError):
+        return f"Timezone needs clarification: {error.reason}"
+
+    if isinstance(error, ImageProcessingError):
+        return f"An attached image could not be used: {error.reason}"
+
+    if isinstance(error, APIResponseError):
+        return ERROR_MAPPINGS["invalid json"]
+
+    if isinstance(error, CalendarAPIError):
+        if "api key" in error_str or "expired" in error_str or "authentication" in error_str:
+            return ERROR_MAPPINGS["api key"]
 
     # Check error message patterns
     for pattern, message in ERROR_MAPPINGS.items():
@@ -51,4 +62,3 @@ def get_user_friendly_error(error: Exception) -> str:
 
     # Default message
     return f"An error occurred: {str(error)}"
-

@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 EventCalendarGenerator (v2.0.0) is a PyQt6 desktop application for macOS that converts natural language descriptions and images (event flyers, photos) into calendar events using Google's Gemini AI. Users input text like "Dinner with Sarah next Thursday at 7pm" or drag-and-drop event images, and the app extracts event details, generates ICS files, and opens them in the system calendar.
 
+Runtime support starts at Python 3.10. Gemini integration uses the supported
+`google-genai` SDK with per-client credentials, structured JSON output, a
+60-second HTTP timeout, application-owned retries, and remote-file cleanup.
+
 The codebase uses a modular Python package architecture (`src/eventcalendar/`) with an Anthropic-inspired design system.
 
 ## Commands
@@ -86,7 +90,7 @@ src/eventcalendar/               # Main package (v2.0.0)
 
 ### Backward Compatibility Layer
 
-Root-level files (`Calender.py`, `api_client.py`, `config.py`, `exceptions.py`) re-export from the `eventcalendar` package with `DeprecationWarning`. New code should import from the package:
+Root-level files (`Calender.py`, `api_client.py`, `config.py`, `exceptions.py`) re-export from the `eventcalendar` package with `DeprecationWarning` when running from a source checkout. They are not installed with the wheel. New code must import from the package:
 
 ```python
 # Preferred
@@ -105,10 +109,12 @@ from Calender import NLCalendarCreator
 - `eventcalendar.config.constants` - All string constants, error patterns, ABBR_TO_TZ timezone map
 
 ### Core
-- `CalendarAPIClient.get_event_data(text, images, status_callback)` - Main Gemini extraction call (returns event dicts)
+- `CalendarAPIClient.extract_events(text, images, status_callback, cancel_event)` - Main validated Gemini extraction call (returns events plus warnings)
+- `CalendarAPIClient.get_event_data(text, images, status_callback)` - Compatibility list-returning wrapper
 - `CalendarAPIClient.create_calendar_event(text, images, status_callback)` - Back-compat helper (returns merged ICS string)
 - `CalendarEvent.from_dict(data)` / `.to_dict()` - Event serialization with validation
-- `build_ics_from_events(events)` - Convert events to ICS format
+- `build_ics_batch(events)` - Convert events to structured success/skip/warning output
+- `build_ics_from_events(events)` - Compatibility tuple-returning wrapper
 - `is_retryable_error(error)` - Determine if error is transient
 
 ### Storage
@@ -170,6 +176,7 @@ The app uses `ThreadPoolExecutor` for background API calls to keep the UI respon
 - Signals (`update_status_signal`, `finalize_events_signal`) communicate results back to the main Qt thread
 - `ThemeManager` uses a class-level lock for thread-safe theme state
 - Futures tracked with `_threads_lock` for proper cleanup
+- Window close sets a cancellation token, cancels queued futures, closes the SDK client, and removes managed temporary files
 
 ## Exception Hierarchy
 
@@ -208,15 +215,14 @@ Defined in `eventcalendar.core.retry`:
 - Times are parsed exactly as stated and converted to UTC for ICS storage (with DST gap/ambiguity handling)
 - "Time-zone jump" events can provide `start_timezone`/`end_timezone` and optional `end_date` for travel-style events
 - All-day events set `"all_day": true` (with optional `end_date` for multi-day); emitted as `DTSTART;VALUE=DATE` with RFC 5545 exclusive `DTEND` (day after the last day)
-- `ABBR_TO_TZ` in `config/constants.py` maps timezone abbreviations (EST, PST, etc.) to IANA zones
-- Multiple images can be attached; they're uploaded to Gemini before the text prompt
+- Explicit abbreviations such as `EST` and `PDT` are fixed offsets; generic `ET`/`PT` follow DST-aware IANA zones; ambiguous `CST`/`BST`/`IST` are rejected
+- Up to eight content-verified images can be attached; remote uploads are deleted after each generation attempt sequence
 - ICS files use CRLF line endings per RFC5545
 - Event UIDs are regenerated with `@nl-calendar` suffix when combining ICS documents
 - Sensitive data masked before logging via `utils/masking.py`
 
 ### Useful Environment Variables
 - `GEMINI_API_KEY_FREE` / `GEMINI_API_KEY` - API key (free-tier var is preferred)
-- `EVENTCALENDAR_UPLOAD_WORKERS` - parallel image upload worker count (default 3)
 - `EVENTCALENDAR_DISABLE_IMAGE_PREPROCESSING` - disable image resizing/optimization (set to `1`/`true`)
 - `EVENTCALENDAR_IMAGE_MAX_EDGE_PX`, `EVENTCALENDAR_IMAGE_JPEG_QUALITY`, `EVENTCALENDAR_IMAGE_MAX_BYTES` - image preprocessing tuning
 - `EVENTCALENDAR_DST_AMBIGUOUS` - `earlier|later|raise` (default `later`)

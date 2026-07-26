@@ -11,7 +11,12 @@ import tzlocal
 from dateutil import tz as du_tz
 from pytz.exceptions import AmbiguousTimeError, NonExistentTimeError
 
-from eventcalendar.config.constants import ABBR_TO_TZ
+from eventcalendar.config.constants import (
+    ABBR_TO_TZ,
+    AMBIGUOUS_TZ_ABBREVIATIONS,
+    FIXED_TZ_ABBREVIATIONS,
+)
+from eventcalendar.exceptions.errors import TimezoneResolutionError
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +165,7 @@ def _normalize_tz_candidate(candidate: str) -> Optional[str]:
         return upper.replace(" ", "")
 
     # Abbreviations (EST/PDT/etc.) – normalize to upper.
-    if upper in ABBR_TO_TZ:
+    if upper in ABBR_TO_TZ or upper in FIXED_TZ_ABBREVIATIONS or upper in AMBIGUOUS_TZ_ABBREVIATIONS:
         return upper
 
     return None
@@ -214,12 +219,13 @@ def resolve_timezone(tz_str: str, event_title: Optional[str] = None) -> Tuple[ob
     tz_str_raw = tz_str or "local"
     tz_clean = str(tz_str_raw).strip()
     tz_upper = tz_clean.upper()
-    warning = None
-
     if tz_upper == "LOCAL":
         # User's system zone (DST aware)
-        local_tz_obj = tzlocal.get_localzone()
-        tz_name = getattr(local_tz_obj, "zone", str(local_tz_obj))
+        try:
+            tz_name = tzlocal.get_localzone_name()
+        except AttributeError:
+            local_tz_obj = tzlocal.get_localzone()
+            tz_name = getattr(local_tz_obj, "zone", str(local_tz_obj))
     else:
         offset_seconds = _parse_utc_offset_seconds(tz_clean)
         if offset_seconds is not None:
@@ -227,23 +233,29 @@ def resolve_timezone(tz_str: str, event_title: Optional[str] = None) -> Tuple[ob
                 return pytz.utc, None
             return du_tz.tzoffset(tz_upper.replace(" ", ""), offset_seconds), None
 
+        if tz_upper in AMBIGUOUS_TZ_ABBREVIATIONS:
+            raise TimezoneResolutionError(
+                tz_clean,
+                "ambiguous abbreviation; use an IANA zone such as America/Chicago "
+                "or a numeric offset such as UTC-06:00",
+            )
+
+        if tz_upper in FIXED_TZ_ABBREVIATIONS:
+            return du_tz.tzoffset(tz_upper, FIXED_TZ_ABBREVIATIONS[tz_upper]), None
+
         tz_name = ABBR_TO_TZ.get(tz_upper, tz_clean)
 
     try:
         local_tz = pytz.timezone(tz_name)
     except pytz.UnknownTimeZoneError:
-        # Last-ditch attempt with dateutil (may return fixed offset)
+        # Last-ditch attempt with dateutil for valid platform-provided zones.
         local_tz = du_tz.gettz(tz_name)
         if local_tz is None:
-            local_tz = pytz.utc
-            event_desc = f"'{event_title}'" if event_title else "event"
-            warning = (
-                f"Couldn't resolve timezone '{tz_str_raw}' for {event_desc} - "
-                "using UTC. Please verify the time in your calendar."
-            )
-            logger.warning(warning)
+            event_context = f" for '{event_title}'" if event_title else ""
+            logger.warning("Unresolvable timezone %r%s", tz_str_raw, event_context)
+            raise TimezoneResolutionError(tz_clean)
 
-    return local_tz, warning
+    return local_tz, None
 
 
 _RAISE_POLICIES = {"raise", "error", "strict"}

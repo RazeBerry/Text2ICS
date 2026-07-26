@@ -9,7 +9,6 @@ utilitarian.
 
 import base64
 import logging
-import mimetypes
 import os
 import shutil
 import tempfile
@@ -21,7 +20,12 @@ from PyQt6.QtCore import Qt, pyqtSignal, QByteArray
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QFrame, QFileDialog
 
-from eventcalendar.config.constants import SUPPORTED_IMAGE_EXTENSIONS
+from eventcalendar.config.constants import (
+    MAX_IMAGE_ATTACHMENTS,
+    MAX_IMAGE_PIXELS,
+    SUPPORTED_IMAGE_EXTENSIONS,
+)
+from eventcalendar.core.image_preprocessing import validate_image_file
 from eventcalendar.ui.theme.colors import get_color
 from eventcalendar.ui.theme.scales import SPACING_SCALE, BORDER_RADIUS, FONT_SANS
 from eventcalendar.ui.styles.base import px
@@ -381,7 +385,20 @@ class ImageAttachmentArea(QFrame):
         """Add processed image payloads and refresh widget state."""
         if not images:
             return False
-        self.image_data.extend(images)
+        available = max(0, MAX_IMAGE_ATTACHMENTS - len(self.image_data))
+        accepted = images[:available]
+        for rejected in images[available:]:
+            rejected_path = rejected.temp_path
+            if rejected_path:
+                Path(rejected_path).unlink(missing_ok=True)
+                self._temp_paths.discard(rejected_path)
+            self._known_sources.discard(rejected.source_path)
+        if not accepted:
+            logger.warning("Image attachment limit (%d) reached", MAX_IMAGE_ATTACHMENTS)
+            return False
+        if len(accepted) < len(images):
+            logger.warning("Only %d images are allowed; ignored %d", MAX_IMAGE_ATTACHMENTS, len(images) - len(accepted))
+        self.image_data.extend(accepted)
         self.setStyleSheet(self._get_active_style())
         self._update_active_state()
         self.images_changed.emit(True)
@@ -439,7 +456,7 @@ class ImageAttachmentArea(QFrame):
         if not self._is_supported_image(file_path):
             return None
         if not os.path.exists(file_path):
-            logger.warning("Dropped file does not exist: %s", file_path)
+            logger.warning("Dropped file does not exist: %s", Path(file_path).name)
             return None
 
         canonical = str(Path(file_path).resolve())
@@ -447,17 +464,17 @@ class ImageAttachmentArea(QFrame):
             return None  # Duplicate
 
         try:
+            validated = validate_image_file(canonical)
             temp_path = self._copy_to_temp(canonical)
-            mime_type = mimetypes.guess_type(file_path)[0] or 'image/jpeg'
             self._known_sources.add(canonical)
             self._temp_paths.add(temp_path)
             return ImageAttachmentPayload(
                 source_path=canonical,
-                mime_type=mime_type,
+                mime_type=validated.mime_type,
                 temp_path=temp_path
             )
         except Exception as e:
-            logger.error("Error preparing dropped file '%s': %s", file_path, e)
+            logger.error("Error preparing dropped file '%s': %s", Path(file_path).name, e)
             return None
 
     def _process_in_memory_image(self, image_data) -> Optional[ImageAttachmentPayload]:
@@ -473,17 +490,23 @@ class ImageAttachmentArea(QFrame):
         if pixmap is None or pixmap.isNull():
             return None
 
+        temp_path = None
         try:
+            if pixmap.width() * pixmap.height() > MAX_IMAGE_PIXELS:
+                raise ValueError(f"image exceeds the {MAX_IMAGE_PIXELS:,}-pixel limit")
             temp_path = self._save_pixmap_to_temp(pixmap)
+            validated = validate_image_file(temp_path)
             self._temp_paths.add(temp_path)
             self._known_sources.add(temp_path)
             return ImageAttachmentPayload(
                 source_path=temp_path,
-                mime_type="image/png",
+                mime_type=validated.mime_type,
                 temp_path=temp_path
             )
         except Exception as e:
             logger.error("Error processing in-memory image: %s", e)
+            if temp_path:
+                Path(temp_path).unlink(missing_ok=True)
             return None
 
     def _extract_pixmap(self, image_data) -> Optional[QPixmap]:
@@ -557,7 +580,13 @@ class ImageAttachmentArea(QFrame):
             True if supported.
         """
         suffix = Path(file_path).suffix.lower()
-        return bool(suffix) and suffix in SUPPORTED_IMAGE_EXTENSIONS
+        if not suffix or suffix not in SUPPORTED_IMAGE_EXTENSIONS:
+            return False
+        try:
+            validate_image_file(file_path)
+            return True
+        except Exception:
+            return False
 
     def _copy_to_temp(self, source_path: str) -> str:
         """Copy the file to a managed temporary location.

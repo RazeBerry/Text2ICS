@@ -7,25 +7,29 @@ class CalendarAPIError(Exception):
 
 
 class TimezoneResolutionError(CalendarAPIError):
-    """Failed to resolve timezone - using fallback."""
+    """A timezone could not be resolved without guessing."""
 
-    def __init__(self, tz_name: str, fallback: str = "UTC"):
+    def __init__(self, tz_name: str, reason: str = "unknown timezone"):
         self.tz_name = tz_name
-        self.fallback = fallback
-        super().__init__(
-            f"Failed to resolve timezone '{tz_name}', using {fallback}"
-        )
+        self.reason = reason
+        super().__init__(f"Cannot resolve timezone '{tz_name}': {reason}")
 
 
 class EventValidationError(CalendarAPIError):
-    """Event data failed validation - missing required fields."""
+    """Event data failed validation."""
 
-    def __init__(self, missing_fields: set, event_title: str = "Unknown"):
-        self.missing_fields = missing_fields
+    def __init__(
+        self,
+        missing_fields: set | None = None,
+        event_title: str = "Unknown",
+        reason: str | None = None,
+    ):
+        self.missing_fields = missing_fields or set()
         self.event_title = event_title
-        super().__init__(
-            f"Event '{event_title}' is missing required fields: {missing_fields}"
-        )
+        if reason is None:
+            reason = f"missing required fields: {self.missing_fields}"
+        self.reason = reason
+        super().__init__(f"Event '{event_title}' is invalid: {reason}")
 
 
 class ImageProcessingError(CalendarAPIError):

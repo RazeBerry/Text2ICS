@@ -9,9 +9,18 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
+
+from eventcalendar.config.constants import (
+    IMAGE_FORMAT_MIME_TYPES,
+    MAX_IMAGE_BYTES,
+    MAX_IMAGE_PIXELS,
+    SUPPORTED_PIL_FORMATS,
+)
+from eventcalendar.exceptions.errors import ImageProcessingError
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +70,60 @@ class PreprocessedImage:
                 Path(cleanup_path).unlink(missing_ok=True)
             except Exception as exc:
                 logger.debug("Failed to delete temp image %s: %s", cleanup_path, exc)
+
+
+@dataclass(frozen=True)
+class ValidatedImage:
+    """Verified metadata for an accepted image file."""
+
+    format: str
+    mime_type: str
+    width: int
+    height: int
+    size_bytes: int
+
+
+def validate_image_file(
+    source_path: str,
+    *,
+    max_bytes: int = MAX_IMAGE_BYTES,
+    max_pixels: int = MAX_IMAGE_PIXELS,
+) -> ValidatedImage:
+    """Verify file size, decoder format, dimensions, and image integrity."""
+    source = Path(source_path)
+    try:
+        if not source.is_file():
+            raise ValueError("file does not exist or is not a regular file")
+        size_bytes = source.stat().st_size
+        if size_bytes <= 0:
+            raise ValueError("file is empty")
+        if size_bytes > max_bytes:
+            raise ValueError(f"file exceeds the {max_bytes // (1024 * 1024)} MB limit")
+
+        from PIL import Image
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(source, formats=sorted(SUPPORTED_PIL_FORMATS)) as image:
+                image_format = str(image.format or "").upper()
+                if image_format not in SUPPORTED_PIL_FORMATS:
+                    raise ValueError(f"unsupported image format {image_format or 'unknown'}")
+                width, height = image.size
+                if width <= 0 or height <= 0 or width * height > max_pixels:
+                    raise ValueError(f"image exceeds the {max_pixels:,}-pixel limit")
+                image.verify()
+    except ImageProcessingError:
+        raise
+    except Exception as exc:
+        raise ImageProcessingError(str(source), str(exc)) from exc
+
+    return ValidatedImage(
+        format=image_format,
+        mime_type=IMAGE_FORMAT_MIME_TYPES[image_format],
+        width=width,
+        height=height,
+        size_bytes=size_bytes,
+    )
 
 
 def _choose_resample(
@@ -118,37 +181,31 @@ def preprocess_image_for_upload(
     Returns:
         PreprocessedImage pointing to the path to upload, and cleanup paths.
     """
+    validated = validate_image_file(source_path)
+
     if os.environ.get("EVENTCALENDAR_DISABLE_IMAGE_PREPROCESSING", "").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }:
-        return PreprocessedImage(source_path, mime_type)
+        return PreprocessedImage(source_path, validated.mime_type)
 
     source = Path(source_path)
-    if not source.exists():
-        return PreprocessedImage(source_path, mime_type)
-
     try:
         from PIL import Image, ImageOps
-    except ImportError:
-        return PreprocessedImage(source_path, mime_type)
+    except ImportError as exc:
+        raise ImageProcessingError(source_path, "Pillow is not installed") from exc
 
-    src_mime = (mime_type or "").lower()
-    src_ext = source.suffix.lower()
+    src_mime = validated.mime_type
 
     try:
-        try:
-            source_size = source.stat().st_size
-        except Exception:
-            source_size = 0
+        source_size = validated.size_bytes
 
-        with Image.open(source) as image:
-            if getattr(image, "is_animated", False):
-                return PreprocessedImage(source_path, mime_type)
-
-            image = ImageOps.exif_transpose(image)
+        with Image.open(source, formats=sorted(SUPPORTED_PIL_FORMATS)) as opened:
+            if getattr(opened, "is_animated", False):
+                opened.seek(0)
+            image = ImageOps.exif_transpose(opened).copy()
 
             original_w, original_h = image.size
             original_max_edge = max(original_w, original_h)
@@ -157,7 +214,7 @@ def preprocess_image_for_upload(
             # If the image is already within our size bounds and not huge on disk,
             # don't touch it (avoids unnecessary recompression/quality loss).
             if not resized and source_size and source_size <= DEFAULT_MAX_BYTES:
-                return PreprocessedImage(source_path, mime_type)
+                return PreprocessedImage(source_path, validated.mime_type)
 
             if resized:
                 resampling = getattr(Image, "Resampling", Image)
@@ -172,7 +229,7 @@ def preprocess_image_for_upload(
             has_alpha = image.mode in ("RGBA", "LA") or (
                 image.mode == "P" and "transparency" in image.info
             )
-            preserve_png = has_alpha or src_mime == "image/png" or src_ext == ".png" or image.format == "PNG"
+            preserve_png = has_alpha or src_mime == "image/png" or validated.format == "PNG"
 
             if preserve_png:
                 out_format = "PNG"
@@ -202,17 +259,18 @@ def preprocess_image_for_upload(
                 raise
 
     except Exception as exc:
-        logger.warning("Image preprocessing failed for %s: %s", source_path, exc)
-        return PreprocessedImage(source_path, mime_type)
+        logger.warning("Image preprocessing failed for %s: %s", Path(source_path).name, exc)
+        raise ImageProcessingError(source_path, str(exc)) from exc
 
     try:
         output_size = Path(out_path).stat().st_size
-    except Exception:
+        validate_image_file(out_path)
+    except Exception as exc:
         Path(out_path).unlink(missing_ok=True)
-        return PreprocessedImage(source_path, mime_type)
+        raise ImageProcessingError(source_path, f"processed image failed validation: {exc}") from exc
 
     if not resized and output_size >= source_size:
         Path(out_path).unlink(missing_ok=True)
-        return PreprocessedImage(source_path, mime_type)
+        return PreprocessedImage(source_path, validated.mime_type)
 
     return PreprocessedImage(out_path, out_mime, cleanup_paths=(out_path,))

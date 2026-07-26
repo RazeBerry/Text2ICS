@@ -3,7 +3,10 @@
 import logging
 import os
 import sys
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Callable, Iterator, Optional, Tuple
+
+from dotenv import unset_key
 
 from eventcalendar.config.constants import PREFERRED_ENV_VAR, PRIMARY_ENV_VAR
 from eventcalendar.storage.keyring_storage import load_from_keyring, save_to_keyring
@@ -16,6 +19,36 @@ from eventcalendar.storage.env_storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _key_sources() -> Iterator[Tuple[Callable[[], Optional[str]], str, Optional[Path]]]:
+    """Yield the single authoritative key lookup order."""
+    yield (
+        lambda: os.environ.get(PREFERRED_ENV_VAR),
+        f"Environment Variable ({PREFERRED_ENV_VAR})",
+        None,
+    )
+    yield (
+        lambda: os.environ.get(PRIMARY_ENV_VAR),
+        f"Environment Variable ({PRIMARY_ENV_VAR})",
+        None,
+    )
+    yield load_from_keyring, f"{get_keyring_display_name()} (Secure)", None
+    user_path = get_env_file_path()
+    yield lambda: load_from_env_file(user_path), f"User Config: {user_path}", user_path
+    if getattr(sys, "frozen", False):
+        executable_path = get_executable_dir_env_path()
+        yield (
+            lambda: load_from_env_file(executable_path),
+            f"Executable Directory: {executable_path}",
+            executable_path,
+        )
+    legacy_path = get_legacy_env_path()
+    yield (
+        lambda: load_from_env_file(legacy_path),
+        f"LEGACY (Insecure): {legacy_path}",
+        legacy_path,
+    )
 
 
 def get_keyring_display_name() -> str:
@@ -39,32 +72,10 @@ def get_api_key_source() -> Tuple[Optional[str], str]:
     Returns:
         Tuple of (api_key, source_description).
     """
-    # Check environment variables first
-    env_key = os.environ.get(PREFERRED_ENV_VAR) or os.environ.get(PRIMARY_ENV_VAR)
-    if env_key:
-        source_name = PREFERRED_ENV_VAR if os.environ.get(PREFERRED_ENV_VAR) else PRIMARY_ENV_VAR
-        return env_key, f"Environment Variable ({source_name})"
-
-    # Check keyring
-    keyring_key = load_from_keyring()
-    if keyring_key:
-        return keyring_key, f"{get_keyring_display_name()} (Secure)"
-
-    # Check user config .env
-    env_file_key = load_from_env_file(get_env_file_path())
-    if env_file_key:
-        return env_file_key, f"User Config: {get_env_file_path()}"
-
-    # Check for .env next to executable (packaged builds)
-    executable_env_key = load_from_env_file(get_executable_dir_env_path())
-    if executable_env_key:
-        exe_path = get_executable_dir_env_path()
-        return executable_env_key, f"Executable Directory: {exe_path}"
-
-    # Check legacy location
-    legacy_key = load_from_env_file(get_legacy_env_path())
-    if legacy_key:
-        return legacy_key, f"LEGACY (Insecure): {get_legacy_env_path()}"
+    for loader, description, _path in _key_sources():
+        key = loader()
+        if key:
+            return key, description
 
     return None, "No API Key Found"
 
@@ -120,33 +131,39 @@ def load_api_key() -> Optional[str]:
     Returns:
         The API key if found, None otherwise.
     """
-    # Check environment variables first
-    env_key = os.environ.get(PREFERRED_ENV_VAR) or os.environ.get(PRIMARY_ENV_VAR)
-    if env_key:
-        return env_key
-
-    # Check keyring
-    keyring_key = load_from_keyring()
-    if keyring_key:
-        return keyring_key
-
-    # Check user config .env
-    env_file_key = load_from_env_file(get_env_file_path())
-    if env_file_key:
-        return env_file_key
-
-    # Check legacy location and attempt migration
-    legacy_key = load_from_env_file(get_legacy_env_path())
-    if legacy_key:
-        logger.warning("Using legacy API key storage - attempting migration...")
-        success, message = migrate_legacy_key()
-        if success:
-            logger.info(message)
-        else:
-            logger.warning("Migration issue: %s", message)
-        return legacy_key
+    legacy_path = get_legacy_env_path()
+    for loader, _description, path in _key_sources():
+        key = loader()
+        if not key:
+            continue
+        if path == legacy_path:
+            logger.warning("Using legacy API key storage - attempting migration...")
+            success, message = migrate_legacy_key()
+            (logger.info if success else logger.warning)(message)
+        return key
 
     return None
+
+
+def delete_legacy_key_file() -> Tuple[bool, str]:
+    """Remove Gemini credentials while preserving unrelated legacy settings."""
+    legacy_path = get_legacy_env_path()
+    if not legacy_path.exists():
+        return True, "Legacy key file is already absent."
+    try:
+        unset_key(str(legacy_path), PREFERRED_ENV_VAR)
+        unset_key(str(legacy_path), PRIMARY_ENV_VAR)
+        remaining_lines = legacy_path.read_text(encoding="utf-8").splitlines()
+        has_other_content = any(
+            line.strip() and not line.lstrip().startswith("#") for line in remaining_lines
+        )
+        if has_other_content:
+            return True, f"Removed Gemini keys and preserved other settings in: {legacy_path}"
+        legacy_path.unlink()
+    except Exception as exc:
+        logger.error("Could not remove legacy credentials from %s: %s", legacy_path, exc)
+        return False, f"Could not remove credentials from {legacy_path}: {exc}"
+    return True, f"Deleted legacy key file: {legacy_path}"
 
 
 def save_api_key(api_key: str) -> bool:

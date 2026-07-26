@@ -1,6 +1,6 @@
 # Natural Language Calendar Creator
 
-A PyQt6-based desktop application that lets you create calendar events using natural language and photos! Simply describe your event(s) in plain English or drag & drop event photos/flyers, and the app will generate and add them to your calendar automatically. Supports creating multiple events in a single entry!
+A PyQt6 desktop application that turns natural-language descriptions and event images into validated ICS calendar imports. It supports multiple events in one request and opens the resulting import in the system's default calendar application.
 
 ## Features
 
@@ -8,24 +8,26 @@ A PyQt6-based desktop application that lets you create calendar events using nat
 - **Photo-to-Calendar Integration** - Drag & drop event flyers or photos to create events
 - **Multi-event processing** - Create multiple events from text or images in a single description
 - Modern UI with light mode
-- Automatic calendar integration
+- Validated, all-or-partial calendar import with clear skipped-event reasons
+- Strict time-zone handling, including travel across time zones
+- Content-verified image attachments with count, byte, and pixel limits
 - Rate limiting and retry handling
 - Progress indicators and status updates
 - Modular code architecture with separation of concerns
 
 ## Requirements
 
-- Python 3.8 or higher
+- Python 3.10 or higher
 - PyQt6
-- Google Generative AI (Gemini) API key
-- macOS (calendar integration currently optimized for macOS)
+- Google Gemini API key
+- macOS, Windows, or Linux with a default application for `.ics` files
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/RazeBerry/Calender2ICS.git
-cd Calender2ICS
+git clone https://github.com/RazeBerry/Text2ICS.git
+cd Text2ICS
 ```
 
 2. Create and activate a virtual environment (recommended):
@@ -49,6 +51,9 @@ pip install -e ".[dev]"
 
 # Alternative (runtime-only)
 pip install -r requirements.txt
+
+# Reproducible runtime environment
+pip install -r requirements.lock
 ```
 
 ## Setting Up the Gemini API Key
@@ -57,7 +62,7 @@ pip install -r requirements.txt
 
 ### 🔒 Automatic Security Features
 
-- **Automatic Migration:** If you have an old API key in a legacy `.env` file, the app will automatically migrate it to secure storage and warn you
+- **Safe Migration:** A legacy project `.env` is migrated to secure storage, then the app asks before deleting the plaintext file
 - **Input Validation:** API keys are sanitized to remove quotes, spaces, and invalid characters
 - **Secure Permissions:** Fallback `.env` files are created with 0o600 permissions (owner-only access)
 - **No Git Exposure:** Legacy `.env` files in the project directory are gitignored to prevent accidental commits
@@ -130,8 +135,8 @@ python Calender.py
 
 - **Never commit `.env` files** with real API keys to version control
 - The app stores keys in your **OS secure storage** (macOS Keychain / Windows Credential Manager / Linux Secret Service)
-- Legacy `.env` files in the project directory are **automatically migrated** to secure storage
-- You'll be warned if your key is stored insecurely and offered automatic migration
+- Legacy `.env` files in the project directory are migrated to secure storage
+- You'll be warned if plaintext storage remains and offered a confirmed deletion
 
 ## Testing the API Client
 
@@ -149,8 +154,8 @@ Run all quality gates locally before pushing:
 
 ```bash
 ruff check .
-vulture .
-pytest
+vulture src/eventcalendar Calender.py api_client.py config.py exceptions.py
+QT_QPA_PLATFORM=offscreen EVENTCALENDAR_RUN_UI_TESTS=1 pytest
 ```
 
 ## Profiling
@@ -165,8 +170,9 @@ python scripts/profile_performance.py --json > profile.json
 
 ## Project Structure
 
-The app lives in `src/eventcalendar/`. Root-level files like `Calender.py` and
-`api_client.py` are backward-compatibility shims and emit `DeprecationWarning`.
+The installed app lives entirely in `src/eventcalendar/`. Root-level files such
+as `Calender.py` and `api_client.py` are deprecated, source-checkout-only shims;
+installed code should import from `eventcalendar`.
 
 ## Usage
 
@@ -185,21 +191,22 @@ The app lives in `src/eventcalendar/`. Root-level files like `Calender.py` and
    ### Photo Input
    - Simply drag & drop event flyers, screenshots, or photos into the attachment area
    - Supports multiple image formats (.png, .jpg, .jpeg, .gif, .webp, .bmp)
+   - Accepts up to 8 verified images, 20 MB and 40 megapixels each
    - The app will analyze the images and extract event details automatically
    - Perfect for conference schedules, event posters, or meeting invitations
    - Combine with text input for additional details or modifications
 
 3. Click "Create Event" 
-4. The event(s) will be created and opened in your default calendar application
+4. A combined import will open in your default calendar application for your confirmation
 5. For multiple events or images, you'll see a status indicator showing progress
 
 ## Troubleshooting
 
 ### API Key Issues
-- Verify your API key is correctly set by printing the environment variable:
+- Verify where the app finds a key without printing the secret:
   ```python
-  import os
-  print(os.getenv("GEMINI_API_KEY"))
+  from eventcalendar.storage.key_manager import get_api_key_source
+  print(get_api_key_source()[1])
   ```
 - Ensure there are no extra spaces or quotes in your API key
 - Try restarting your terminal/IDE after setting the environment variable
@@ -207,8 +214,8 @@ The app lives in `src/eventcalendar/`. Root-level files like `Calender.py` and
 ### Calendar Integration
 - Ensure you have default calendar application set up
 - Check file permissions in the directory where .ics files are being created
-- For multiple events, each event will open separately in your calendar application
-- Verify your system can handle the `open` command (macOS) or equivalent
+- Multiple events are merged into one import file
+- Verify your desktop has a default handler for `.ics` files
 
 ### UI Issues
 - Ensure PyQt6 is properly installed

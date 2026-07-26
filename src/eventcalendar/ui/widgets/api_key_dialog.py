@@ -13,7 +13,7 @@ import re
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFrame
+    QCheckBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFrame
 )
 
 from eventcalendar.storage.key_manager import save_api_key
@@ -102,8 +102,13 @@ class APIKeySetupDialog(QDialog):
         self.api_key_input = QLineEdit()
         self.api_key_input.setPlaceholderText("Paste your API key here...")
         self.api_key_input.setMinimumHeight(52)
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_input.textChanged.connect(self._validate_input)
         layout.addWidget(self.api_key_input)
+
+        self.reveal_key_checkbox = QCheckBox("Show API key")
+        self.reveal_key_checkbox.toggled.connect(self._set_key_visible)
+        layout.addWidget(self.reveal_key_checkbox)
 
         # Validation message
         self.validation_label = QLabel("")
@@ -304,6 +309,11 @@ class APIKeySetupDialog(QDialog):
     def _open_google_ai_studio(self) -> None:
         """Open Google AI Studio in the default browser."""
         QDesktopServices.openUrl(QUrl(self.GOOGLE_AI_STUDIO_URL))
+
+    def _set_key_visible(self, visible: bool) -> None:
+        """Reveal the secret only after an explicit user action."""
+        mode = QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        self.api_key_input.setEchoMode(mode)
 
     def _validate_input(self) -> None:
         """Validate the API key input."""
