@@ -15,12 +15,13 @@ jobs:
       QT_QPA_PLATFORM: offscreen
       EVENTCALENDAR_RUN_UI_TESTS: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
+      - run: sudo apt-get update && sudo apt-get install --yes libegl1 libgl1
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: vulture src/eventcalendar Calender.py api_client.py config.py exceptions.py
@@ -29,14 +30,15 @@ jobs:
   package-and-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
       - run: python -m pip install --upgrade pip build pip-audit
+      - run: sudo apt-get update && sudo apt-get install --yes libegl1 libgl1
       - run: python -m build
       - run: pip-audit -r requirements.lock --no-deps --disable-pip
       - run: pip install dist/*.whl
