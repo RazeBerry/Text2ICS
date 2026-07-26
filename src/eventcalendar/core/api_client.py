@@ -42,7 +42,7 @@ Follow these steps to extract event details and return them as a JSON array:
    - Do NOT attempt timezone conversions - preserve the original wall-clock time as stated
    - If no timezone is specified, assume it's in the user's local timezone ("local")
    - If end time is not specified, estimate a reasonable duration (e.g., 1 hour for meetings, 2-3 hours for dinners)
-   - For all-day events with no times given, use start_time "12:00 AM" and end_time "11:59 PM"
+   - For all-day events with no specific times (festivals, holidays, deadlines), set "all_day": true and omit start_time/end_time
    - If an event "jumps" time zones (e.g., flights), you MAY provide different start/end timezones (and end_date if needed)
 
    **IMPORTANT DATE HANDLING**:
@@ -54,14 +54,15 @@ Follow these steps to extract event details and return them as a JSON array:
    Keys REQUIRED per event:
      - "uid"          : stable unique string (use UUID if needed, no @domain required)
      - "title"        : human title
-     - "start_time"   : single time string (e.g., "7:30 PM", "19:30")
-     - "end_time"     : single time string, extracted or estimated (e.g., "9:00 PM", "21:30")
+     - "start_time"   : single time string (e.g., "7:30 PM", "19:30"); omit when "all_day" is true
+     - "end_time"     : single time string, extracted or estimated (e.g., "9:00 PM", "21:30"); omit when "all_day" is true
      - "date"         : ISO date string (e.g., "2026-08-15")
      - "timezone"     : timezone if explicitly mentioned, otherwise "local"
      - "description"  : plain text (no special escaping needed)
      - "location"     : plain text address or venue name, or "" if none provided
 
    Optional keys (use when helpful, especially for travel / time-zone jumps):
+     - "all_day"       : true for events without specific times; use "end_date" for multi-day all-day events
      - "start_timezone": timezone for the start time (IANA like "America/Los_Angeles", an abbreviation like "PDT", or "local")
      - "end_timezone"  : timezone for the end time (IANA like "America/New_York", an abbreviation like "EDT", or "local")
      - "end_date"      : ISO end date (YYYY-MM-DD) if different from "date"

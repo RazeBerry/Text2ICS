@@ -153,14 +153,40 @@ class TestCalendarEventModel(unittest.TestCase):
         """Verify CalendarEvent raises EventValidationError for missing fields."""
         data = {
             "title": "Test Event",
-            # Missing: uid, start_time, end_time, date, timezone
+            # Missing: start_time, end_time, date (uid/timezone are defaulted)
         }
 
         with self.assertRaises(EventValidationError) as context:
             CalendarEvent.from_dict(data)
 
-        self.assertIn("uid", context.exception.missing_fields)
         self.assertIn("start_time", context.exception.missing_fields)
+        self.assertIn("date", context.exception.missing_fields)
+        self.assertNotIn("uid", context.exception.missing_fields)
+
+    def test_from_dict_defaults_uid_and_timezone(self):
+        """Verify missing uid/timezone are defaulted instead of rejected."""
+        data = {
+            "title": "Test Event",
+            "start_time": "10:00 AM",
+            "end_time": "11:00 AM",
+            "date": "2025-01-15",
+        }
+
+        event = CalendarEvent.from_dict(data)
+        self.assertGreater(len(event.uid), 10)
+        self.assertEqual(event.timezone, "local")
+
+    def test_from_dict_all_day_event(self):
+        """Verify all-day events do not require times and survive a roundtrip."""
+        data = {"title": "Festival", "date": "2025-01-15", "all_day": True}
+
+        event = CalendarEvent.from_dict(data)
+        self.assertTrue(event.all_day)
+        self.assertIsNone(event.start_time)
+        self.assertIsNone(event.end_time)
+
+        recreated = CalendarEvent.from_dict(event.to_dict())
+        self.assertTrue(recreated.all_day)
 
     def test_from_dict_generates_uid_if_empty(self):
         """Verify empty UID is replaced with generated UUID."""

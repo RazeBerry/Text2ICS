@@ -4,7 +4,7 @@ import copy
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import pytz
@@ -44,8 +44,18 @@ class DateTimeResult:
     warning: Optional[str] = None
 
 
-# Required fields for event validation
-REQUIRED_EVENT_FIELDS = {"uid", "title", "start_time", "end_time", "date", "timezone"}
+# Required fields for event validation. "uid" and "timezone" are not listed:
+# both are defaulted during ICS creation, so their absence is not fatal.
+REQUIRED_EVENT_FIELDS = {"title", "start_time", "end_time", "date"}
+ALL_DAY_REQUIRED_FIELDS = {"title", "date"}
+
+
+def _is_all_day(event_dict: Dict) -> bool:
+    """Interpret the optional all_day flag, tolerating LLM string booleans."""
+    value = event_dict.get("all_day", False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1"}
+    return bool(value)
 
 
 def build_ics_from_events(events: list) -> Tuple[List[str], List[str]]:
@@ -105,19 +115,28 @@ def _build_single_event_ics(event_dict: Dict, index: int) -> ICSBuildResult:
         if validation_warning:
             return ICSBuildResult(success=False, warning=validation_warning)
 
-        # Parse date/time with timezone
-        dt_result = _parse_event_datetime(event_dict)
+        # Parse the event window: whole dates for all-day events, otherwise
+        # timezone-resolved UTC datetimes.
+        if _is_all_day(event_dict):
+            start, end = _parse_all_day_dates(event_dict)
+            warning = None
+            all_day = True
+        else:
+            dt_result = _parse_event_datetime(event_dict)
+            start, end = dt_result.start_utc, dt_result.end_utc
+            warning = dt_result.warning
+            all_day = False
 
         # Build the ICS calendar object
         cal = _create_ics_calendar()
-        event = _create_ics_event(event_dict, dt_result)
+        event = _create_ics_event(event_dict, start, end, all_day=all_day)
         cal.add_component(event)
 
         ics_content = _format_ics_output(cal)
         return ICSBuildResult(
             success=True,
             ics_content=ics_content,
-            warning=dt_result.warning
+            warning=warning
         )
 
     except Exception as e:
@@ -137,13 +156,38 @@ def _validate_event_fields(event_dict: Dict, index: int) -> Optional[str]:
     Returns:
         Warning message if validation fails, None otherwise.
     """
-    missing_keys = REQUIRED_EVENT_FIELDS - set(event_dict.keys())
+    required = ALL_DAY_REQUIRED_FIELDS if _is_all_day(event_dict) else REQUIRED_EVENT_FIELDS
+    missing_keys = required - set(event_dict.keys())
     if missing_keys:
         event_title = event_dict.get('title', f'Event {index + 1}')
         warning_msg = f"Skipping '{event_title}' - missing required fields: {missing_keys}"
         logger.warning(warning_msg)
         return warning_msg
     return None
+
+
+def _parse_all_day_dates(event_dict: Dict) -> Tuple[date, date]:
+    """Parse the date range for an all-day event.
+
+    Args:
+        event_dict: Dictionary containing event data.
+
+    Returns:
+        Tuple of (start_date, end_date_exclusive). Per RFC 5545, DTEND for
+        all-day events is non-inclusive: the day AFTER the last event day.
+
+    Raises:
+        ValueError: If the end date is before the start date.
+    """
+    start_day = parser.parse(event_dict["date"]).date()
+    end_date_raw = event_dict.get("end_date")
+    last_day = parser.parse(end_date_raw).date() if end_date_raw else start_day
+    if last_day < start_day:
+        raise ValueError(
+            f"All-day end date ({last_day.isoformat()}) is before start date "
+            f"({start_day.isoformat()})."
+        )
+    return start_day, last_day + timedelta(days=1)
 
 
 def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
@@ -309,12 +353,14 @@ def _create_ics_calendar() -> Calendar:
     return cal
 
 
-def _create_ics_event(event_dict: Dict, dt_result: DateTimeResult) -> Event:
+def _create_ics_event(event_dict: Dict, start, end, all_day: bool = False) -> Event:
     """Create an ICS event component.
 
     Args:
         event_dict: Dictionary containing event data.
-        dt_result: Parsed date/time result.
+        start: Start as a UTC datetime, or a date for all-day events.
+        end: End as a UTC datetime, or the exclusive end date for all-day events.
+        all_day: Whether this is an all-day (VALUE=DATE) event.
 
     Returns:
         An Event component ready to add to a calendar.
@@ -328,9 +374,9 @@ def _create_ics_event(event_dict: Dict, dt_result: DateTimeResult) -> Event:
     # Use current UTC time for DTSTAMP
     ve.add("DTSTAMP", datetime.now(pytz.utc))
 
-    # Add start and end times
-    ve.add("DTSTART", dt_result.start_utc)
-    ve.add("DTEND", dt_result.end_utc)
+    # Add start and end. icalendar serializes date objects as VALUE=DATE.
+    ve.add("DTSTART", start)
+    ve.add("DTEND", end)
 
     # Add summary (title)
     title = event_dict.get("title", DEFAULT_EVENT_TITLE)
@@ -350,7 +396,12 @@ def _create_ics_event(event_dict: Dict, dt_result: DateTimeResult) -> Event:
     alarm = Alarm()
     alarm.add("ACTION", "DISPLAY")
     alarm.add("DESCRIPTION", "Reminder")
-    alarm.add("TRIGGER", timedelta(minutes=DEFAULT_REMINDER_MINUTES))
+    if all_day:
+        # All-day DTSTART is midnight; fire at 09:00 on the first day,
+        # matching the system calendar's default alert for all-day events.
+        alarm.add("TRIGGER", timedelta(hours=9))
+    else:
+        alarm.add("TRIGGER", timedelta(minutes=DEFAULT_REMINDER_MINUTES))
     ve.add_component(alarm)
 
     return ve

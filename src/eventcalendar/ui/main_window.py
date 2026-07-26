@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve,
@@ -836,7 +836,10 @@ class NLCalendarCreator(QMainWindow):
         self.processing_label.setText(message)
 
     def _show_transient_notice(self, message: str, timeout_ms: int = 6000) -> None:
-        """Show non-blocking notice in the status bar."""
+        """Show non-blocking notice in the status bar.
+
+        A timeout_ms of 0 keeps the message up until the next notice replaces it.
+        """
         try:
             self.statusBar().showMessage(message, timeout_ms)
         except Exception:
@@ -1008,8 +1011,8 @@ class NLCalendarCreator(QMainWindow):
         """Finalize events by building ICS and opening calendar."""
         try:
             self.update_status_signal.emit("Creating calendar events...")
-            ics_content = self._build_merged_ics(events)
-            self._open_in_calendar(ics_content, len(events))
+            ics_content, created_count, warnings = self._build_merged_ics(events)
+            self._open_in_calendar(ics_content, created_count, len(events), warnings)
         except Exception as e:
             logger.error("Error finalizing events: %s", e)
             QMessageBox.critical(
@@ -1021,8 +1024,12 @@ class NLCalendarCreator(QMainWindow):
             self.enable_ui_signal.emit(True)
             self.show_progress_signal.emit(False)
 
-    def _build_merged_ics(self, events: List[Dict]) -> str:
-        """Build ICS strings and merge them."""
+    def _build_merged_ics(self, events: List[Dict]) -> Tuple[str, int, List[str]]:
+        """Build ICS strings and merge them.
+
+        Returns:
+            Tuple of (merged ICS content, number of events built, warnings).
+        """
         from eventcalendar.core.ics_builder import build_ics_from_events, combine_ics_strings
 
         ics_strings, warnings = build_ics_from_events(events)
@@ -1031,22 +1038,23 @@ class NLCalendarCreator(QMainWindow):
             raise ValueError("Failed to create ICS files from event data")
 
         if warnings:
-            warning_text = "\n".join(warnings)
-            logger.warning("ICS warnings:\n%s", warning_text)
-            preview_warning = warnings[0]
-            if len(warnings) > 1:
-                preview_warning = f"{preview_warning} (+{len(warnings) - 1} more)"
-            self._show_transient_notice(f"Created with warning: {preview_warning}", timeout_ms=8000)
+            logger.warning("ICS warnings:\n%s", "\n".join(warnings))
 
-        return combine_ics_strings(ics_strings)
+        return combine_ics_strings(ics_strings), len(ics_strings), warnings
 
-    def _open_in_calendar(self, ics_content: str, event_count: int) -> None:
+    def _open_in_calendar(
+        self,
+        ics_content: str,
+        created_count: int,
+        requested_count: int,
+        warnings: List[str],
+    ) -> None:
         """Write temp file and open with system calendar."""
         temp_path = self._write_temp_ics_file(ics_content)
 
         try:
             self._launch_calendar_app(temp_path)
-            self._show_success(event_count)
+            self._show_success(created_count, requested_count, warnings)
             self._schedule_temp_cleanup(temp_path)
         except Exception as e:
             logger.error("Failed to open calendar: %s", e)
@@ -1076,14 +1084,45 @@ class NLCalendarCreator(QMainWindow):
         else:
             subprocess.Popen(["xdg-open", file_path], start_new_session=True)
 
-    def _show_success(self, event_count: int) -> None:
-        """Show success message."""
-        if event_count == 1:
-            message = "Event created successfully!"
-        else:
-            message = f"{event_count} events created successfully!"
+    def _show_success(
+        self,
+        created_count: int,
+        requested_count: Optional[int] = None,
+        warnings: Optional[List[str]] = None,
+    ) -> None:
+        """Report the outcome of event creation in the status bar.
 
-        self._show_transient_notice(message, timeout_ms=5000)
+        Skipped events produce a persistent notice (kept until the next status
+        message) and the inputs are preserved so the user can retry; clean runs
+        keep the short transient toast.
+        """
+        requested = requested_count if requested_count is not None else created_count
+        warnings = warnings or []
+        skipped = requested - created_count
+
+        if skipped > 0:
+            detail = warnings[0] if warnings else "see log for details"
+            more = f" (+{len(warnings) - 1} more, see log)" if len(warnings) > 1 else ""
+            self._show_transient_notice(
+                f"Added {created_count} of {requested} events - "
+                f"{skipped} skipped: {detail}{more}",
+                timeout_ms=0,
+            )
+            return
+
+        if warnings:
+            more = f" (+{len(warnings) - 1} more)" if len(warnings) > 1 else ""
+            noun = "Event" if created_count == 1 else f"{created_count} events"
+            message = f"{noun} created with warning: {warnings[0]}{more}"
+            timeout_ms = 10000
+        elif created_count == 1:
+            message = "Event created successfully!"
+            timeout_ms = 5000
+        else:
+            message = f"{created_count} events created successfully!"
+            timeout_ms = 5000
+
+        self._show_transient_notice(message, timeout_ms=timeout_ms)
         self._clear_inputs()
 
     def _schedule_temp_cleanup(self, file_path: str) -> None:

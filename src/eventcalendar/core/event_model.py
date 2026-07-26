@@ -13,17 +13,27 @@ class CalendarEvent:
 
     uid: str
     title: str
-    start_time: str
-    end_time: str
+    start_time: Optional[str]
+    end_time: Optional[str]
     date: str
     timezone: str
     description: Optional[str] = None
     location: Optional[str] = None
+    all_day: bool = False
 
-    # Required fields for validation
+    # Required fields for validation. "uid" and "timezone" are defaulted in
+    # from_dict, so their absence is not fatal. All-day events carry no times.
     REQUIRED_FIELDS: Set[str] = frozenset({
-        "uid", "title", "start_time", "end_time", "date", "timezone"
+        "title", "start_time", "end_time", "date"
     })
+    ALL_DAY_REQUIRED_FIELDS: Set[str] = frozenset({"title", "date"})
+
+    @staticmethod
+    def _parse_all_day_flag(value) -> bool:
+        """Interpret the optional all_day flag, tolerating LLM string booleans."""
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "yes", "1"}
+        return bool(value)
 
     @classmethod
     def from_dict(cls, data: Dict) -> "CalendarEvent":
@@ -38,7 +48,9 @@ class CalendarEvent:
         Raises:
             EventValidationError: If required fields are missing.
         """
-        missing = cls.REQUIRED_FIELDS - set(data.keys())
+        all_day = cls._parse_all_day_flag(data.get("all_day", False))
+        required = cls.ALL_DAY_REQUIRED_FIELDS if all_day else cls.REQUIRED_FIELDS
+        missing = required - set(data.keys())
         if missing:
             raise EventValidationError(
                 missing_fields=missing,
@@ -47,12 +59,13 @@ class CalendarEvent:
         return cls(
             uid=data.get("uid") or str(uuid.uuid4()),
             title=data["title"],
-            start_time=data["start_time"],
-            end_time=data["end_time"],
+            start_time=data.get("start_time"),
+            end_time=data.get("end_time"),
             date=data["date"],
             timezone=data.get("timezone", "local"),
             description=data.get("description"),
             location=data.get("location"),
+            all_day=all_day,
         )
 
     def to_dict(self) -> Dict:
@@ -64,11 +77,15 @@ class CalendarEvent:
         result = {
             "uid": self.uid,
             "title": self.title,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
             "date": self.date,
             "timezone": self.timezone,
         }
+        if self.start_time:
+            result["start_time"] = self.start_time
+        if self.end_time:
+            result["end_time"] = self.end_time
+        if self.all_day:
+            result["all_day"] = True
         if self.description:
             result["description"] = self.description
         if self.location:

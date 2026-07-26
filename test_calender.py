@@ -206,6 +206,41 @@ def test_cross_midnight_event_rolls_end_date() -> None:
     assert dtend - dtstart == timedelta(hours=2)
 
 
+def test_all_day_event_uses_value_date() -> None:
+    ics_strings, warnings = build_ics_from_events([
+        {"title": "Street Festival", "date": "2026-08-15", "all_day": True}
+    ])
+
+    assert warnings == []
+    assert len(ics_strings) == 1
+    lines = ics_strings[0].split("\r\n")
+    assert "DTSTART;VALUE=DATE:20260815" in lines
+    # RFC 5545: all-day DTEND is exclusive (the day after the last day).
+    assert "DTEND;VALUE=DATE:20260816" in lines
+    assert "TRIGGER:PT9H" in lines
+
+
+def test_all_day_multi_day_event_has_exclusive_end() -> None:
+    ics_strings, warnings = build_ics_from_events([
+        {"title": "Festival", "date": "2026-08-15", "end_date": "2026-08-17", "all_day": True}
+    ])
+
+    assert warnings == []
+    lines = ics_strings[0].split("\r\n")
+    assert "DTSTART;VALUE=DATE:20260815" in lines
+    assert "DTEND;VALUE=DATE:20260818" in lines
+
+
+def test_missing_uid_and_timezone_are_defaulted() -> None:
+    ics_strings, warnings = build_ics_from_events([
+        {"title": "Meeting", "start_time": "10:00", "end_time": "11:00", "date": "2026-08-15"}
+    ])
+
+    assert warnings == []
+    assert len(ics_strings) == 1
+    assert any(line.startswith("UID:") for line in ics_strings[0].split("\r\n"))
+
+
 @pytest.mark.parametrize(
     "time_str,expected",
     [
@@ -454,11 +489,38 @@ def test_build_merged_ics_uses_non_blocking_warning_notice(
         raise AssertionError("Blocking warning dialog should not be used.")
 
     monkeypatch.setattr(QMessageBox, "warning", fail_if_modal)
-    merged = window._build_merged_ics([{"uid": "1"}])
+    merged, created_count, warnings = window._build_merged_ics([{"uid": "1"}])
 
     assert merged.startswith("BEGIN:VCALENDAR")
+    assert created_count == 1
+    assert warnings == ["Timezone fallback used"]
+
+    window._clear_inputs = lambda: None  # type: ignore[assignment]
+    window._show_success(created_count, 1, warnings)
+
     assert notices
-    assert "Created with warning:" in notices[0][0]
+    assert "with warning:" in notices[0][0]
+    window.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_show_success_reports_skipped_events_persistently(qt_app: Any) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+
+    window = NLCalendarCreator()
+    notices: list[tuple[str, int]] = []
+    cleared: list[bool] = []
+    window._show_transient_notice = lambda message, timeout_ms=6000: notices.append((message, timeout_ms))  # type: ignore[assignment]
+    window._clear_inputs = lambda: cleared.append(True)  # type: ignore[assignment]
+
+    window._show_success(3, 5, ["Skipping 'X' - missing required fields: {'date'}"])
+
+    assert notices
+    message, timeout_ms = notices[0]
+    assert message.startswith("Added 3 of 5 events")
+    assert "2 skipped" in message
+    assert timeout_ms == 0  # persistent until the next status message replaces it
+    assert cleared == []  # inputs preserved so the user can retry
     window.close()
 
 

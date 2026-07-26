@@ -78,7 +78,6 @@ src/eventcalendar/               # Main package (v2.0.0)
 │       ├── image_area.py        # ImageAttachmentArea (drag-drop)
 │       └── api_key_dialog.py    # APIKeySetupDialog
 ├── utils/
-│   ├── date_parsing.py          # Date/time extraction regexes
 │   ├── masking.py               # mask_key() for secure logging
 │   └── paths.py                 # get_resource_path(), get_package_dir(), get_project_root()
 └── exceptions/
@@ -208,6 +207,7 @@ Defined in `eventcalendar.core.retry`:
 - Fonts are centralized via `FONT_FAMILIES` in `ui/theme/scales.py`
 - Times are parsed exactly as stated and converted to UTC for ICS storage (with DST gap/ambiguity handling)
 - "Time-zone jump" events can provide `start_timezone`/`end_timezone` and optional `end_date` for travel-style events
+- All-day events set `"all_day": true` (with optional `end_date` for multi-day); emitted as `DTSTART;VALUE=DATE` with RFC 5545 exclusive `DTEND` (day after the last day)
 - `ABBR_TO_TZ` in `config/constants.py` maps timezone abbreviations (EST, PST, etc.) to IANA zones
 - Multiple images can be attached; they're uploaded to Gemini before the text prompt
 - ICS files use CRLF line endings per RFC5545
