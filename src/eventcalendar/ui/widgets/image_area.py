@@ -16,9 +16,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, pyqtSignal, QByteArray
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
-from PyQt6.QtWidgets import QLabel, QVBoxLayout, QFrame, QFileDialog
+from PyQt6.QtCore import Qt, pyqtSignal, QByteArray, QPointF, QRectF, QSize
+from PyQt6.QtGui import (
+    QColor,
+    QDragEnterEvent,
+    QDropEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
+from PyQt6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QLabel,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from eventcalendar.config.constants import (
     MAX_IMAGE_ATTACHMENTS,
@@ -31,6 +46,68 @@ from eventcalendar.ui.theme.scales import SPACING_SCALE, BORDER_RADIUS, FONT_SAN
 from eventcalendar.ui.styles.base import px
 
 logger = logging.getLogger(__name__)
+
+
+class AttachmentStatusIcon(QWidget):
+    """Draw a consistently centred attachment-state icon.
+
+    Font symbols have platform-specific baselines and side bearings, which can
+    make an otherwise centred label look crooked.  Painting the geometry in a
+    fixed square keeps both states optically aligned on every platform.
+    """
+
+    _CANVAS_SIZE = 40
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._attached = False
+        self.setFixedSize(self._CANVAS_SIZE, self._CANVAS_SIZE)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def sizeHint(self) -> QSize:
+        """Return the square canvas used by both icon states."""
+        return QSize(self._CANVAS_SIZE, self._CANVAS_SIZE)
+
+    def set_attached(self, attached: bool) -> None:
+        """Select the empty-image or attached-check state."""
+        if self._attached == attached:
+            return
+        self._attached = attached
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        """Paint an image outline or checkmark on the same optical centre."""
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        color = QColor(get_color("accent" if self._attached else "border_medium"))
+        pen = QPen(color, 2.25)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        if self._attached:
+            # The circle and path share the exact centre of the 40 px canvas.
+            painter.drawEllipse(QPointF(20.0, 20.0), 11.0, 11.0)
+            check = QPainterPath(QPointF(14.5, 20.0))
+            check.lineTo(18.5, 24.0)
+            check.lineTo(25.5, 16.5)
+            painter.drawPath(check)
+            return
+
+        # A proper image pictogram reads more naturally than a bare square.
+        frame = QRectF(8.5, 9.5, 23.0, 21.0)
+        painter.drawRoundedRect(frame, 3.0, 3.0)
+        painter.drawEllipse(QPointF(25.5, 15.5), 2.0, 2.0)
+        landscape = QPainterPath(QPointF(11.5, 27.0))
+        landscape.lineTo(17.0, 21.0)
+        landscape.lineTo(20.5, 24.5)
+        landscape.lineTo(23.0, 22.0)
+        landscape.lineTo(28.5, 27.0)
+        painter.drawPath(landscape)
 
 
 @dataclass
@@ -110,17 +187,13 @@ class ImageAttachmentArea(QFrame):
         # Spacer to push content to center
         layout.addStretch(1)
 
-        # Decorative icon - simple geometric shape
-        self.icon_label = QLabel("\u25A1")  # Square symbol
-        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.icon_label.setStyleSheet(f"""
-            QLabel {{
-                font-family: {FONT_SANS};
-                font-size: 28px;
-                color: {get_color('border_medium')};
-            }}
-        """)
-        layout.addWidget(self.icon_label)
+        # Painted icon: explicit geometry avoids platform-dependent glyph
+        # baselines and keeps the empty/attached states on the same centre.
+        self.status_icon = AttachmentStatusIcon()
+        layout.addWidget(
+            self.status_icon,
+            alignment=Qt.AlignmentFlag.AlignHCenter,
+        )
 
         # Primary text - explicit sans-serif to match input placeholder
         self.primary_label = QLabel("Drop image here or click to browse")
@@ -151,7 +224,7 @@ class ImageAttachmentArea(QFrame):
         layout.addWidget(self.secondary_label)
 
         # Route clicks on labels to the parent frame for click-to-browse.
-        for label in (self.section_label, self.icon_label, self.primary_label, self.secondary_label):
+        for label in (self.section_label, self.primary_label, self.secondary_label):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         # Bottom spacer
@@ -222,14 +295,8 @@ class ImageAttachmentArea(QFrame):
                 color: {get_color('text_tertiary')};
             }}
         """)
-        self.icon_label.setText("\u25A1")  # Empty square
-        self.icon_label.setStyleSheet(f"""
-            QLabel {{
-                font-family: {FONT_SANS};
-                font-size: 28px;
-                color: {get_color('border_medium')};
-            }}
-        """)
+        self.status_icon.set_attached(False)
+        self.status_icon.update()
         self.primary_label.setText("Drop image here or click to browse")
         self.primary_label.setStyleSheet(f"""
             QLabel {{
@@ -266,14 +333,8 @@ class ImageAttachmentArea(QFrame):
             }}
         """)
 
-        self.icon_label.setText("\u2713")  # Checkmark
-        self.icon_label.setStyleSheet(f"""
-            QLabel {{
-                font-family: {FONT_SANS};
-                font-size: 28px;
-                color: {get_color('accent')};
-            }}
-        """)
+        self.status_icon.set_attached(True)
+        self.status_icon.update()
 
         if count == 1:
             self.primary_label.setText("1 image ready")
