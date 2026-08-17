@@ -12,7 +12,9 @@ class APIConfig:
     base_delay: float = 1.0
     max_backoff: float = 10.0
     timeout_seconds: float = 60.0
-    max_output_tokens: int = 8192
+    # Gemini 3.x bills thinking tokens against this budget, so keep headroom
+    # for large multi-event flyers. Model ceiling is 65536.
+    max_output_tokens: int = 32768
     temperature: float = 0.0
     top_p: float = 0.3
     top_k: int = 64
