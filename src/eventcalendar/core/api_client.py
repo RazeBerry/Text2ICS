@@ -58,10 +58,10 @@ class CalendarAPIClient:
 Extract every distinct calendar event from the text and images.
 
 Return a JSON array and nothing else. For each event:
-- title, date, timezone, description, location, and all_day are required.
+- title, date, start_time, end_time, timezone, description, location, and all_day are required.
 - date/end_date use YYYY-MM-DD.
 - start_time/end_time each contain one clock time, never a range or date.
-- omit start_time/end_time only when all_day is true.
+- always output start_time and end_time; for an all_day event set both to "00:00" (they are ignored).
 - preserve stated wall-clock times; never convert them.
 - use "local" when no timezone is stated.
 - use an IANA timezone or numeric UTC offset when an abbreviation is ambiguous.
@@ -97,7 +97,17 @@ Current timezone: {user_timezone}
                 "location": {"type": "string"},
                 "all_day": {"type": "boolean"},
             },
-            "required": ["title", "date", "timezone", "description", "location", "all_day"],
+            # Gemini 3.x constrained decoding emits properties in this order and skips
+            # optional ones, so the time fields must be ordered early and required.
+            # All-day events send a placeholder time that CalendarEvent.from_dict ignores.
+            "propertyOrdering": [
+                "title", "date", "start_time", "end_time", "end_date", "timezone",
+                "start_timezone", "end_timezone", "description", "location", "all_day", "uid",
+            ],
+            "required": [
+                "title", "date", "start_time", "end_time",
+                "timezone", "description", "location", "all_day",
+            ],
             "additionalProperties": False,
         },
     }

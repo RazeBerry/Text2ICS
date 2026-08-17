@@ -7,7 +7,7 @@ from typing import Tuple
 @dataclass(frozen=True)
 class APIConfig:
     """Configuration for API interactions."""
-    model_name: str = "gemini-2.5-flash"
+    model_name: str = "gemini-3.7-flash"
     max_retries: int = 5
     base_delay: float = 1.0
     max_backoff: float = 10.0
