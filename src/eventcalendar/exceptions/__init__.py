@@ -6,6 +6,7 @@ from eventcalendar.exceptions.errors import (
     EventValidationError,
     ImageProcessingError,
     APIResponseError,
+    RequestDeadlineExceeded,
     RetryExhaustedError,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "EventValidationError",
     "ImageProcessingError",
     "APIResponseError",
+    "RequestDeadlineExceeded",
     "RetryExhaustedError",
 ]

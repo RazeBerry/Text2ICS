@@ -7,6 +7,7 @@ only inside preprocessing functions.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tempfile
 import warnings
@@ -50,7 +51,7 @@ def _get_resample_name(default: str = "bicubic") -> str:
 # Conservative defaults: reduce huge images without hurting flyer readability.
 DEFAULT_MAX_EDGE_PX = max(512, min(_get_int_env("EVENTCALENDAR_IMAGE_MAX_EDGE_PX", 2560), 8192))
 DEFAULT_JPEG_QUALITY = max(50, min(_get_int_env("EVENTCALENDAR_IMAGE_JPEG_QUALITY", 88), 95))
-DEFAULT_MAX_BYTES = max(256_000, min(_get_int_env("EVENTCALENDAR_IMAGE_MAX_BYTES", 2_500_000), 25_000_000))
+DEFAULT_MAX_BYTES = max(256_000, min(_get_int_env("EVENTCALENDAR_IMAGE_MAX_BYTES", 1_400_000), 25_000_000))
 DEFAULT_RESAMPLE = _get_resample_name("auto")
 DEFAULT_JPEG_OPTIMIZE = _get_bool_env("EVENTCALENDAR_IMAGE_JPEG_OPTIMIZE", False)
 DEFAULT_JPEG_PROGRESSIVE = _get_bool_env("EVENTCALENDAR_IMAGE_JPEG_PROGRESSIVE", False)
@@ -151,6 +152,48 @@ def _choose_resample(
     return resampling.BICUBIC
 
 
+def _save_with_byte_budget(
+    image,
+    out_path: str,
+    out_format: str,
+    save_kwargs: dict,
+    max_output_bytes: int,
+) -> int:
+    """Encode, then reduce dimensions/quality until the output is truly bounded."""
+    current = image
+    kwargs = dict(save_kwargs)
+    try:
+        for _attempt in range(6):
+            current.save(out_path, format=out_format, **kwargs)
+            output_size = Path(out_path).stat().st_size
+            if output_size <= max_output_bytes:
+                return output_size
+
+            width, height = current.size
+            if min(width, height) <= 128:
+                break
+            scale = min(
+                0.90,
+                max(0.50, math.sqrt(max_output_bytes / output_size) * 0.92),
+            )
+            resized = current.resize(
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                resample=2,
+            )
+            # Integer 2 is Pillow's stable BILINEAR value and avoids importing
+            # Pillow at module import time solely for this private helper.
+            if current is not image:
+                current.close()
+            current = resized
+            if out_format == "JPEG" and "quality" in kwargs:
+                kwargs["quality"] = max(65, int(kwargs["quality"]) - 6)
+    finally:
+        if current is not image:
+            current.close()
+
+    raise ValueError(f"processed image could not be reduced below {max_output_bytes} bytes")
+
+
 def preprocess_image_for_upload(
     source_path: str,
     mime_type: Optional[str] = None,
@@ -202,19 +245,26 @@ def preprocess_image_for_upload(
     try:
         source_size = validated.size_bytes
 
-        with Image.open(source, formats=sorted(SUPPORTED_PIL_FORMATS)) as opened:
-            if getattr(opened, "is_animated", False):
-                opened.seek(0)
-            image = ImageOps.exif_transpose(opened).copy()
+        with Image.open(source, formats=sorted(SUPPORTED_PIL_FORMATS)) as image:
+            if getattr(image, "is_animated", False):
+                image.seek(0)
 
             original_w, original_h = image.size
             original_max_edge = max(original_w, original_h)
             resized = original_max_edge > max_edge_px
 
             # If the image is already within our size bounds and not huge on disk,
-            # don't touch it (avoids unnecessary recompression/quality loss).
+            # don't decode or touch it (avoids unnecessary work and quality loss).
             if not resized and source_size and source_size <= DEFAULT_MAX_BYTES:
                 return PreprocessedImage(source_path, validated.mime_type)
+
+            # Pillow's non-in-place exif_transpose() returns a full image copy even
+            # when no orientation transform is required.  An additional .copy()
+            # here previously kept multiple source-sized pixel buffers alive until
+            # after thumbnailing.  The supported Pillow version can normalize EXIF
+            # orientation in place, so resize the opened image directly and only
+            # allocate a converted image later when the output codec requires it.
+            ImageOps.exif_transpose(image, in_place=True)
 
             if resized:
                 resampling = getattr(Image, "Resampling", Image)
@@ -253,7 +303,13 @@ def preprocess_image_for_upload(
             os.close(fd)
 
             try:
-                image.save(out_path, format=out_format, **save_kwargs)
+                _save_with_byte_budget(
+                    image,
+                    out_path,
+                    out_format,
+                    save_kwargs,
+                    DEFAULT_MAX_BYTES,
+                )
             except Exception:
                 Path(out_path).unlink(missing_ok=True)
                 raise
@@ -264,6 +320,8 @@ def preprocess_image_for_upload(
 
     try:
         output_size = Path(out_path).stat().st_size
+        if output_size > DEFAULT_MAX_BYTES:
+            raise ValueError(f"processed image exceeds {DEFAULT_MAX_BYTES} bytes")
         validate_image_file(out_path)
     except Exception as exc:
         Path(out_path).unlink(missing_ok=True)

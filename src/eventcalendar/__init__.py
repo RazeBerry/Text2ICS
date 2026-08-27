@@ -12,16 +12,20 @@ from eventcalendar.config.settings import API_CONFIG, UI_CONFIG
 from eventcalendar.exceptions.errors import (
     CalendarAPIError,
     EventValidationError,
+    RequestDeadlineExceeded,
     RetryExhaustedError,
 )
-from eventcalendar.core.api_client import CalendarAPIClient
+from eventcalendar.core.api_client import CalendarAPIClient, ExtractionResult
 from eventcalendar.core.event_model import CalendarEvent
 from eventcalendar.core.ics_builder import (
     ICSBatchResult,
+    ICSMergedResult,
     build_ics_batch,
     build_ics_from_events,
+    build_merged_ics,
     combine_ics_strings,
 )
+from eventcalendar.core.submission_runtime import SubmissionMetrics
 
 
 def __getattr__(name: str):
@@ -42,12 +46,17 @@ __all__ = [
     "CalendarAPIError",
     "EventValidationError",
     "RetryExhaustedError",
+    "RequestDeadlineExceeded",
     # Core
     "CalendarAPIClient",
+    "ExtractionResult",
+    "SubmissionMetrics",
     "CalendarEvent",
     "build_ics_from_events",
     "build_ics_batch",
+    "build_merged_ics",
     "ICSBatchResult",
+    "ICSMergedResult",
     "combine_ics_strings",
     "NLCalendarCreator",
 ]

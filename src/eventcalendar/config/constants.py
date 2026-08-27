@@ -33,11 +33,8 @@ ICS_VERSION = "2.0"
 ICS_CALSCALE = "GREGORIAN"
 DEFAULT_REMINDER_MINUTES = -30  # 30 minutes before event
 
-# Default event title when none provided
-DEFAULT_EVENT_TITLE = "No Title"
-
 # Status callback messages
-STATUS_ATTEMPTING = "Attempting to get event details... (Try {attempt}/{max_retries})"
+STATUS_ATTEMPTING = "Extracting event details... (attempt {attempt} of {max_retries})"
 STATUS_SUCCESS = "Successfully extracted {count} event(s)."
 STATUS_MAX_RETRIES = "Error: Max retries reached. Failed to create event."
 

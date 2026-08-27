@@ -8,7 +8,8 @@ EventCalendarGenerator (v2.0.0) is a PyQt6 desktop application for macOS that co
 
 Runtime support starts at Python 3.10. Gemini integration uses the supported
 `google-genai` SDK with per-client credentials, structured JSON output, a
-60-second HTTP timeout, application-owned retries, and remote-file cleanup.
+60-second work deadline, stage-specific timeouts, cancellable async I/O,
+application-owned retries, and a separate six-second remote-cleanup budget.
 
 The codebase uses a modular Python package architecture (`src/eventcalendar/`) with an Anthropic-inspired design system.
 
@@ -57,9 +58,13 @@ src/eventcalendar/               # Main package (v2.0.0)
 │   └── settings.py              # APIConfig, UIConfig frozen dataclasses
 ├── core/
 │   ├── api_client.py            # CalendarAPIClient (Gemini integration)
+│   ├── attachments.py           # Attachment payloads and temp-file ownership
 │   ├── event_model.py           # CalendarEvent dataclass
 │   ├── ics_builder.py           # build_ics_from_events(), combine_ics_strings()
+│   ├── image_preprocessing.py   # Bounded upload image validation/resizing
 │   ├── retry.py                 # is_retryable_error(), smart retry logic
+│   ├── submission_runtime.py    # Deadline, metrics, media ownership, cancellable SDK loop
+│   ├── temporal_resolution.py   # DST, all-day, and cross-zone time policy
 │   └── timezone_utils.py        # resolve_timezone(), extract_timezone_from_time_string(), attach_timezone_with_warnings()
 ├── storage/
 │   ├── key_manager.py           # load_api_key(), save_api_key(), migration helpers
@@ -67,6 +72,7 @@ src/eventcalendar/               # Main package (v2.0.0)
 │   └── env_storage.py           # .env file handling
 ├── ui/
 │   ├── main_window.py           # NLCalendarCreator(QMainWindow)
+│   ├── event_creation_controller.py # Job state, worker, cancellation, client ownership
 │   ├── preview.py               # Event preview parsing
 │   ├── error_messages.py        # get_user_friendly_error()
 │   ├── theme/
@@ -80,6 +86,7 @@ src/eventcalendar/               # Main package (v2.0.0)
 │   │   └── button_styles.py     # ButtonStyles static methods
 │   └── widgets/
 │       ├── image_area.py        # ImageAttachmentArea (drag-drop)
+│       ├── progress_overlay.py  # Animated progress presentation and lifecycle
 │       └── api_key_dialog.py    # APIKeySetupDialog
 ├── utils/
 │   ├── masking.py               # mask_key() for secure logging
@@ -104,7 +111,7 @@ from Calender import NLCalendarCreator
 ## Key Modules Reference
 
 ### Configuration
-- `eventcalendar.config.settings.API_CONFIG` - Model name, retries, backoff, temperature
+- `eventcalendar.config.settings.API_CONFIG` - Model, thinking level, deadlines, retries, and inline-media budget
 - `eventcalendar.config.settings.UI_CONFIG` - Debounce timings, window size, executor workers
 - `eventcalendar.config.constants` - All string constants, error patterns, ABBR_TO_TZ timezone map
 
@@ -114,6 +121,7 @@ from Calender import NLCalendarCreator
 - `CalendarAPIClient.create_calendar_event(text, images, status_callback)` - Back-compat helper (returns merged ICS string)
 - `CalendarEvent.from_dict(data)` / `.to_dict()` - Event serialization with validation
 - `build_ics_batch(events)` - Convert events to structured success/skip/warning output
+- `build_merged_ics(events)` - Build one calendar directly from dictionaries or validated models
 - `build_ics_from_events(events)` - Compatibility tuple-returning wrapper
 - `is_retryable_error(error)` - Determine if error is transient
 
@@ -157,8 +165,8 @@ radius = px(BORDER_RADIUS["lg"])    # "16px"
 ```python
 from eventcalendar.ui.styles.button_styles import ButtonStyles
 button.setStyleSheet(ButtonStyles.accent())   # Primary action
-button.setStyleSheet(ButtonStyles.ghost())    # Subtle action
-button.setStyleSheet(ButtonStyles.danger())   # Destructive action
+button.setStyleSheet(ButtonStyles.tertiary()) # Subtle action
+button.setStyleSheet(ButtonStyles.secondary()) # Outlined action
 ```
 
 ### Color Palette Keys
@@ -171,12 +179,13 @@ button.setStyleSheet(ButtonStyles.danger())   # Destructive action
 
 ## Threading Model
 
-The app uses `ThreadPoolExecutor` for background API calls to keep the UI responsive:
-- `NLCalendarCreator._executor` manages worker threads (max 2, configurable via `UI_CONFIG`)
-- Signals (`update_status_signal`, `finalize_events_signal`) communicate results back to the main Qt thread
+The app keeps blocking work outside the Qt thread:
+- `EventCreationController` owns a one-job executor, explicit `idle/running/closing/closed` state, cancellation, and the API-client lifetime
+- `CancellableNetworkRuntime` owns a persistent async SDK loop; the worker-facing API stays synchronous while active HTTP tasks remain cancellable
+- Typed signals communicate status, results, errors, and lifecycle changes back to the main Qt thread
+- In-memory image drops are encoded by a dedicated one-worker executor; `AttachmentStore` owns every accepted temporary file
 - `ThemeManager` uses a class-level lock for thread-safe theme state
-- Futures tracked with `_threads_lock` for proper cleanup
-- Window close sets a cancellation token, cancels queued futures, closes the SDK client, and removes managed temporary files
+- Window close rejects new work immediately; SDK transport close is deferred until active extraction and remote-file cleanup complete
 
 ## Exception Hierarchy
 
@@ -191,9 +200,9 @@ CalendarAPIError (base)
 
 ### Retry Classification
 Defined in `eventcalendar.core.retry`:
-- **Non-retryable**: Invalid API key, permission denied, quota exceeded
-- **Retryable**: Timeout, service unavailable, network errors
-- Uses pattern matching on error strings via `is_retryable_error()`
+- **Non-retryable**: Invalid API key, permission denied, malformed requests, quota exhaustion
+- **Retryable**: Rate limits, timeouts, service unavailable, and transient network errors
+- Typed status/code classification is authoritative; message matching remains a compatibility fallback
 
 ## API Key Storage Priority
 
@@ -216,10 +225,27 @@ Defined in `eventcalendar.core.retry`:
 - "Time-zone jump" events can provide `start_timezone`/`end_timezone` and optional `end_date` for travel-style events
 - All-day events set `"all_day": true` (with optional `end_date` for multi-day); emitted as `DTSTART;VALUE=DATE` with RFC 5545 exclusive `DTEND` (day after the last day)
 - Explicit abbreviations such as `EST` and `PDT` are fixed offsets; generic `ET`/`PT` follow DST-aware IANA zones; ambiguous `CST`/`BST`/`IST` are rejected
-- Up to eight content-verified images can be attached; remote uploads are deleted after each generation attempt sequence
+- Up to eight content-verified images can be attached; transient batches under the conservative 12 MiB raw aggregate budget are sent inline in the one generation request
+- Overflow uses deterministically named File API resources, reconciles response-loss ambiguity, and performs retryable cleanup inside a separate six-second budget
 - ICS files use CRLF line endings per RFC5545
-- Event UIDs are regenerated with `@nl-calendar` suffix when combining ICS documents
+- The production finalizer builds one calendar directly and assigns fresh `@nl-calendar` UIDs; `combine_ics_strings()` remains a compatibility utility
 - Sensitive data masked before logging via `utils/masking.py`
+
+### Performance regression check
+
+```bash
+python scripts/profile_performance.py --iterations 3000 --check --json
+python scripts/profile_network_submission.py --check
+```
+
+This combines generous machine-sensitive ceilings with tighter shape checks for
+cold import-to-first-paint, preview parsing, direct-versus-compatibility
+128-event ICS assembly, upload-image preprocessing, worker-side encoding, queue
+latency, and Qt heartbeat gaps for a 12 MP drop. The Python 3.13 CI lane runs the
+same checks.
+The network profile separately gates SDK-call/request shape, inline-versus-file
+behavior, and cancellation of an active transport coroutine without consuming
+Gemini quota.
 
 ### Useful Environment Variables
 - `GEMINI_API_KEY_FREE` / `GEMINI_API_KEY` - API key (free-tier var is preferred)

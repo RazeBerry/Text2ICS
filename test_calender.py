@@ -2,6 +2,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -45,6 +47,16 @@ def qt_app() -> Any:
     if app is None:
         app = QApplication([])
     return app
+
+
+def _wait_for_ui(qt_app: Any, predicate, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        qt_app.processEvents()
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError("condition was not reached before timeout")
 
 
 @pytest.fixture(autouse=True)
@@ -299,31 +311,23 @@ def test_format_date_display_handles_relative_terms() -> None:
 
 
 @pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
-def test_process_event_uses_executor(qt_app: Any) -> None:
-    """Verify process_event uses ThreadPoolExecutor for background work."""
+def test_process_event_submits_to_creation_controller(qt_app: Any) -> None:
+    """Verify process_event crosses the explicit controller boundary."""
     from eventcalendar.ui.main_window import NLCalendarCreator
 
     window = NLCalendarCreator()
-    window.api_client = object()
     window.text_input.setPlainText("Test event at 7pm tomorrow")
+    window._prefetched_api_key = "AIzaControllerTest"
+    window._ensure_api_client = lambda: True  # type: ignore[assignment]
 
-    submitted_tasks: list[dict[str, Any]] = []
+    submitted: list[tuple[Any, ...]] = []
 
-    class MockFuture:
-        def add_done_callback(self, _callback: Any) -> None:
-            pass
-
-    def mock_submit(fn: Any, *args: Any, **kwargs: Any) -> MockFuture:
-        submitted_tasks.append({"fn": fn, "args": args, "kwargs": kwargs})
-        return MockFuture()
-
-    window._executor.submit = mock_submit
+    window._creation_controller.submit = lambda *args: submitted.append(args)  # type: ignore[method-assign]
     window.process_event()
 
-    assert len(submitted_tasks) == 1
-    assert submitted_tasks[0]["fn"] == window._create_event_thread
-    assert hasattr(window, "_executor")
-    assert window._executor is not None
+    assert len(submitted) == 1
+    assert submitted[0][0] == "Test event at 7pm tomorrow"
+    assert submitted[0][2] == "AIzaControllerTest"
 
     window.close()
 
@@ -382,6 +386,10 @@ def test_overlay_is_built_lazily(qt_app: Any) -> None:
     assert window.overlay is not None
     assert window.overlay.isVisible()
 
+    window.resize(window.width() + 40, window.height() + 20)
+    qt_app.processEvents()
+    assert window.overlay.geometry() == window.centralWidget().rect()
+
     window._show_progress(False)
     assert not window.overlay.isVisible()
     window.close()
@@ -409,22 +417,12 @@ def test_process_event_passes_api_key_to_worker(qt_app: Any) -> None:
     window._prefetched_api_key = "AIzaFromPrefetch"
     window._ensure_api_client = lambda: True  # type: ignore[assignment]
 
-    submitted_tasks: list[dict[str, Any]] = []
-
-    class MockFuture:
-        def add_done_callback(self, _callback: Any) -> None:
-            pass
-
-    def mock_submit(fn: Any, *args: Any, **kwargs: Any) -> MockFuture:
-        submitted_tasks.append({"fn": fn, "args": args, "kwargs": kwargs})
-        return MockFuture()
-
-    window._executor.submit = mock_submit  # type: ignore[assignment]
+    submitted: list[tuple[Any, ...]] = []
+    window._creation_controller.submit = lambda *args: submitted.append(args)  # type: ignore[method-assign]
     window.process_event()
 
-    assert len(submitted_tasks) == 1
-    assert submitted_tasks[0]["fn"] == window._create_event_thread
-    assert submitted_tasks[0]["args"][2] == "AIzaFromPrefetch"
+    assert len(submitted) == 1
+    assert submitted[0][2] == "AIzaFromPrefetch"
     window.close()
 
 
@@ -438,11 +436,13 @@ def test_worker_initializes_client_and_handles_empty_events(
     window = NLCalendarCreator()
     window._setup_overlay()
     statuses: list[str] = []
+    terminal_statuses: list[str] = []
     enabled: list[bool] = []
     progress: list[bool] = []
-    window.update_status_signal.connect(statuses.append)
-    window.enable_ui_signal.connect(enabled.append)
-    window.show_progress_signal.connect(progress.append)
+    window._creation_controller.status_changed.connect(statuses.append)
+    window._update_status = terminal_statuses.append  # type: ignore[method-assign]
+    window._set_ui_enabled = enabled.append  # type: ignore[method-assign]
+    window._show_progress = progress.append  # type: ignore[method-assign]
 
     class FakeClient:
         def __init__(self, api_key: str):
@@ -462,16 +462,64 @@ def test_worker_initializes_client_and_handles_empty_events(
             assert not cancel_event.is_set()
             return ExtractionResult([])
 
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr(api_client_module, "CalendarAPIClient", FakeClient)
-    window.api_client = None
-    window._create_event_thread("demo", [], "AIzaFakeKey")
+    extraction = window._creation_controller._run("demo", (), "AIzaFakeKey")
+    window._handle_creation_completed(extraction)
     qt_app.processEvents()
 
     assert isinstance(window.api_client, FakeClient)
     assert statuses[0] == "Initializing AI client..."
-    assert statuses[-1] == "No events found"
+    assert terminal_statuses == ["No events found"]
     assert enabled[-1] is True
     assert progress[-1] is False
+    window.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_overlay_cancel_restores_usable_window(qt_app: Any) -> None:
+    from concurrent.futures import CancelledError
+
+    from eventcalendar.ui.event_creation_controller import JobState
+    from eventcalendar.ui.main_window import NLCalendarCreator
+
+    started = threading.Event()
+
+    class FakeClient:
+        def extract_events(self, *_args: Any, cancel_event: threading.Event, **_kwargs: Any):
+            started.set()
+            assert cancel_event.wait(2)
+            raise CancelledError("cancelled by user")
+
+        def close(self) -> None:
+            pass
+
+    window = NLCalendarCreator()
+    window.text_input.setPlainText("Meeting tomorrow at 7pm")
+    window._prefetched_api_key = "AIzaCancelTest"
+    window._ensure_api_client = lambda: True  # type: ignore[assignment]
+    window._creation_controller.set_client_for_testing(FakeClient())
+    window.show()
+    qt_app.processEvents()
+
+    window.process_event()
+    assert started.wait(1)
+    _wait_for_ui(qt_app, lambda: window.overlay is not None and window.overlay.isVisible())
+    assert window.overlay is not None
+    window.overlay.cancel_button.click()
+    _wait_for_ui(
+        qt_app,
+        lambda: (
+            window._creation_controller.state is JobState.IDLE
+            and not window.overlay.isVisible()
+        ),
+    )
+
+    assert not window.overlay.isVisible()
+    assert window.text_input.isEnabled()
+    assert window.create_button.isEnabled()
     window.close()
 
 
@@ -489,15 +537,14 @@ def test_build_merged_ics_uses_non_blocking_warning_notice(
 
     monkeypatch.setattr(
         ics_builder_module,
-        "build_ics_batch",
-        lambda events: ics_builder_module.ICSBatchResult(
-            ["BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"],
+        "build_merged_ics",
+        lambda events: ics_builder_module.ICSMergedResult(
+            "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
             events,
             [],
             ["Timezone warning"],
         ),
     )
-    monkeypatch.setattr(ics_builder_module, "combine_ics_strings", lambda parts: parts[0])
 
     def fail_if_modal(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("Blocking warning dialog should not be used.")
@@ -575,6 +622,7 @@ def test_image_area_click_dialog_selects_image(qt_app: Any, monkeypatch: pytest.
         monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *args, **kwargs: ([image_path], ""))
         area._select_images_from_dialog()
 
+        _wait_for_ui(qt_app, lambda: bool(area.image_data))
         assert len(area.image_data) == 1
         assert area.primary_label.text() == "1 image ready"
         area.reset_state()
@@ -628,10 +676,11 @@ def test_close_cancels_work_closes_client_and_removes_temp_ics(qt_app: Any) -> N
     class FakeClient:
         def close(self) -> None:
             closed.append(True)
+            raise RuntimeError("simulated transport-close failure")
 
     with tempfile.NamedTemporaryFile(suffix=".ics", delete=False) as tmp:
         temp_path = tmp.name
-    window._active_futures.add(FakeFuture())
+    window._creation_controller._futures.add(FakeFuture())
     window.api_client = FakeClient()
     window._temp_ics_paths.add(temp_path)
     window.close()
@@ -639,7 +688,86 @@ def test_close_cancels_work_closes_client_and_removes_temp_ics(qt_app: Any) -> N
     assert cancelled == [True]
     assert closed == [True]
     assert not os.path.exists(temp_path)
-    assert window._cancel_event.is_set()
+    assert window._creation_controller._cancel_event.is_set()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_stale_storage_warmup_cannot_overwrite_interactive_key(
+    qt_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from eventcalendar.ui.main_window import NLCalendarCreator
+    import eventcalendar.ui.main_window as main_window_module
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def stale_load() -> None:
+        started.set()
+        assert release.wait(2)
+        return None
+
+    monkeypatch.setattr(main_window_module, "load_api_key", stale_load)
+    window = NLCalendarCreator(prompt_for_api_key=True)
+    prompts: list[bool] = []
+    window.api_key_required_signal.connect(lambda: prompts.append(True))
+    worker = threading.Thread(target=window._storage_warmup_worker)
+    worker.start()
+    assert started.wait(1)
+
+    window._publish_interactive_api_key("NEWLY_SAVED_KEY")
+    release.set()
+    worker.join(timeout=2)
+    qt_app.processEvents()
+
+    assert not worker.is_alive()
+    assert window._prefetched_api_key == "NEWLY_SAVED_KEY"
+    assert window._prefetch_ready.is_set()
+    assert prompts == []
+    window.close()
+
+
+@pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")
+def test_finalization_prefers_extraction_models_without_revalidation(
+    qt_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PyQt6.QtWidgets import QMessageBox
+    from eventcalendar.core.api_client import ExtractionResult
+    from eventcalendar.core.event_model import CalendarEvent
+    from eventcalendar.ui.main_window import NLCalendarCreator
+
+    raw = {
+        "title": "Typed handoff",
+        "start_time": "10:00",
+        "end_time": "11:00",
+        "date": "2026-09-01",
+        "timezone": "Europe/Paris",
+        "description": "Roadmap",
+        "location": "Room 1",
+    }
+    model = CalendarEvent.from_dict(raw)
+    extraction = ExtractionResult(events=[raw], event_models=(model,))
+    window = NLCalendarCreator()
+    captured: list[Any] = []
+    errors: list[Any] = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: errors.append(args))
+    monkeypatch.setattr(window, "_update_status", lambda *_args: None)
+    monkeypatch.setattr(
+        window,
+        "_build_merged_ics",
+        lambda events: (captured.extend(events) or "ics", 1, []),
+    )
+    monkeypatch.setattr(window, "_open_in_calendar", lambda *_args: None)
+    monkeypatch.setattr(
+        CalendarEvent,
+        "from_dict",
+        classmethod(lambda cls, data: (_ for _ in ()).throw(AssertionError("revalidated"))),
+    )
+
+    window._finalize_events(extraction)
+
+    assert errors == []
+    assert captured == [model]
+    window.close()
 
 
 @pytest.mark.skipif(not UI_AVAILABLE, reason="UI tests disabled (set EVENTCALENDAR_RUN_UI_TESTS=1 to enable).")

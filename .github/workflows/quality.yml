@@ -26,6 +26,10 @@ jobs:
       - run: ruff check .
       - run: vulture src/eventcalendar Calender.py api_client.py config.py exceptions.py
       - run: pytest --cov=eventcalendar --cov-report=term-missing --cov-fail-under=65
+      - if: matrix.python-version == '3.13'
+        run: python scripts/profile_performance.py --iterations 3000 --check --json
+      - if: matrix.python-version == '3.13'
+        run: python scripts/profile_network_submission.py --check
 
   package-and-audit:
     runs-on: ubuntu-latest

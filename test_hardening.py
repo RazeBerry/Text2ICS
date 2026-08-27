@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from icalendar import Calendar
 
 from eventcalendar.core.api_client import (
     CalendarAPIClient,
-    UploadedImageBatch,
+    PreparedMediaBatch,
 )
 from eventcalendar.core.event_model import CalendarEvent
 from eventcalendar.core.ics_builder import build_ics_batch, build_ics_from_events
@@ -47,6 +48,9 @@ def _valid_event(**updates):
 def _bare_client() -> CalendarAPIClient:
     client = object.__new__(CalendarAPIClient)
     client._closed = False
+    client._close_lock = threading.Lock()
+    client._active_operations = 0
+    client._transport_close_started = False
     client.max_retries = 1
     client.base_delay = 0
     return client
@@ -164,25 +168,29 @@ def test_current_sdk_client_receives_timeout_and_single_attempt(monkeypatch: pyt
 
     monkeypatch.setattr(genai, "Client", FakeSDKClient)
     client = CalendarAPIClient("AIzaConstructionOnly")
-    assert captured["http_options"].timeout == 60_000
+    assert captured["http_options"].timeout == 45_000
     assert captured["http_options"].retry_options.attempts == 1
     assert client.generation_config.response_mime_type == "application/json"
+    assert client.generation_config.thinking_config.thinking_level.value == "LOW"
+    assert client.generation_config.temperature is None
 
 
 def test_response_parser_validates_top_level_and_each_event() -> None:
     client = _bare_client()
     with pytest.raises(APIResponseError, match="JSON array"):
-        client._parse_response(json.dumps(_valid_event()))
+        client._parse_response_models(json.dumps(_valid_event()))
     with pytest.raises(APIResponseError, match="failed validation"):
-        client._parse_response(json.dumps([{"title": "Incomplete"}]))
-    assert client._parse_response(json.dumps([_valid_event()]))[0]["title"] == "Review"
+        client._parse_response_models(json.dumps([{"title": "Incomplete"}]))
+    with pytest.raises(APIResponseError, match="64-event safety limit"):
+        client._parse_response_models(json.dumps([_valid_event()] * 65))
+    assert client._parse_response_models(json.dumps([_valid_event()]))[0].title == "Review"
 
 
 def test_status_callback_failures_do_not_change_success(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _bare_client()
-    monkeypatch.setattr(client, "_prepare_images", lambda *_args: UploadedImageBatch())
+    monkeypatch.setattr(client, "_prepare_images", lambda *_args: PreparedMediaBatch())
     monkeypatch.setattr(client, "_call_api", lambda *_args: json.dumps([_valid_event()]))
-    monkeypatch.setattr(client, "_delete_remote_files", lambda _files: None)
+    monkeypatch.setattr(client, "_delete_remote_files", lambda *_args: None)
 
     result = client.extract_events("Review tomorrow", [], lambda _message: (_ for _ in ()).throw(RuntimeError()))
     assert len(result.events) == 1
@@ -192,9 +200,13 @@ def test_remote_files_are_deleted_after_invalid_response(monkeypatch: pytest.Mon
     client = _bare_client()
     uploaded = SimpleNamespace(name="files/test")
     deleted = []
-    monkeypatch.setattr(client, "_prepare_images", lambda *_args: UploadedImageBatch([uploaded]))
+    monkeypatch.setattr(
+        client,
+        "_prepare_images",
+        lambda *_args: PreparedMediaBatch([uploaded], [uploaded]),
+    )
     monkeypatch.setattr(client, "_call_api", lambda *_args: "{}")
-    monkeypatch.setattr(client, "_delete_remote_files", lambda files: deleted.extend(files))
+    monkeypatch.setattr(client, "_delete_remote_files", lambda files, *_args: deleted.extend(files))
 
     with pytest.raises(APIResponseError):
         client.extract_events("Review", [("image.png", "image/png", None)])
@@ -206,7 +218,7 @@ def test_all_failed_images_are_not_silently_ignored(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         client,
         "_prepare_images",
-        lambda *_args: UploadedImageBatch([], ["image.png: invalid image"]),
+        lambda *_args: PreparedMediaBatch(failures=["image.png: invalid image"]),
     )
     with pytest.raises(ImageProcessingError, match="invalid image"):
         client.extract_events("", [("image.png", "image/png", None)])

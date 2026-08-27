@@ -7,20 +7,20 @@ and atmospheric feedback states. The design feels inviting rather than
 utilitarian.
 """
 
-import base64
 import logging
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal, QByteArray, QPointF, QRectF, QSize
 from PyQt6.QtGui import (
     QColor,
     QDragEnterEvent,
     QDropEvent,
+    QImage,
     QPainter,
     QPainterPath,
     QPen,
@@ -41,6 +41,7 @@ from eventcalendar.config.constants import (
     SUPPORTED_IMAGE_EXTENSIONS,
 )
 from eventcalendar.core.image_preprocessing import validate_image_file
+from eventcalendar.core.attachments import AttachmentStore, ImageAttachmentPayload
 from eventcalendar.ui.theme.colors import get_color
 from eventcalendar.ui.theme.scales import SPACING_SCALE, BORDER_RADIUS, FONT_SANS
 from eventcalendar.ui.styles.base import px
@@ -110,29 +111,6 @@ class AttachmentStatusIcon(QWidget):
         painter.drawPath(landscape)
 
 
-@dataclass
-class ImageAttachmentPayload:
-    """Payload for an attached image."""
-    source_path: str
-    mime_type: str
-    temp_path: Optional[str] = None
-    base64_data: Optional[str] = None
-
-    def materialize(self, include_base64: bool = True) -> Tuple[str, str, Optional[str]]:
-        """Get the file path, MIME type, and optionally base64 data.
-
-        Returns:
-            Tuple of (path, mime_type, base64_data).
-        """
-        path = self.temp_path or self.source_path
-        if not path:
-            raise ValueError("Image attachment is missing a file path")
-        if include_base64 and self.base64_data is None:
-            with open(path, "rb") as fh:
-                self.base64_data = base64.b64encode(fh.read()).decode("utf-8")
-        return path, self.mime_type, (self.base64_data if include_base64 else None)
-
-
 class ImageAttachmentArea(QFrame):
     """Custom widget for handling image drag and drop.
 
@@ -142,6 +120,8 @@ class ImageAttachmentArea(QFrame):
 
     # Signal emitted when images are added/cleared
     images_changed = pyqtSignal(bool)  # True when images added, False when cleared
+    processing_changed = pyqtSignal(bool)
+    _attachment_ready = pyqtSignal(object)
 
     def __init__(self, parent=None):
         """Initialize the image attachment area.
@@ -153,9 +133,16 @@ class ImageAttachmentArea(QFrame):
         self.setAcceptDrops(True)
         self.setMinimumHeight(SPACING_SCALE["xxl"] * 2)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.image_data: List[ImageAttachmentPayload] = []
-        self._temp_paths: set = set()
-        self._known_sources: set = set()
+        self._attachments = AttachmentStore(MAX_IMAGE_ATTACHMENTS)
+        self._pending_images = 0
+        self._pending_sources: set[str] = set()
+        self._attachment_generation = 0
+        self._closing = False
+        self._image_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="attachment_encoder",
+        )
+        self._attachment_ready.connect(self._finish_attachment)
 
         self._setup_layout()
         self.setStyleSheet(self._get_base_style())
@@ -275,10 +262,11 @@ class ImageAttachmentArea(QFrame):
 
     def reset_state(self) -> None:
         """Reset the widget to its initial state."""
-        self._cleanup_temp_files()
-        self.image_data = []
-        self._temp_paths.clear()
-        self._known_sources.clear()
+        self._attachment_generation += 1
+        self._pending_images = 0
+        self._pending_sources.clear()
+        self.processing_changed.emit(False)
+        self._attachments.clear()
         self.setStyleSheet(self._get_base_style())
         self._update_empty_state()
         self.images_changed.emit(False)
@@ -360,26 +348,26 @@ class ImageAttachmentArea(QFrame):
             }}
         """)
 
-    def _cleanup_temp_files(self) -> None:
-        """Clean up temporary files."""
-        for temp_path in list(self._temp_paths):
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception as e:
-                logger.warning("Failed to delete temp image file '%s': %s", temp_path, e)
-            finally:
-                self._temp_paths.discard(temp_path)
-
     def closeEvent(self, event) -> None:
         """Handle widget close event."""
-        self._cleanup_temp_files()
+        self.shutdown()
         super().closeEvent(event)
+
+    def shutdown(self) -> None:
+        """Cancel queued encodes and reject results from running ones."""
+        if self._closing:
+            return
+        self._closing = True
+        self.reset_state()
+        self._image_executor.shutdown(wait=False, cancel_futures=True)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Handle drag enter event."""
         if event.mimeData().hasUrls():
             urls = event.mimeData().urls()
-            if all(self._is_supported_image(url.toLocalFile()) for url in urls):
+            # Drag-enter runs on the Qt thread and can fire repeatedly. Use the
+            # extension only as an interaction hint; validate contents once on drop.
+            if all(self._has_supported_image_extension(url.toLocalFile()) for url in urls):
                 self.setStyleSheet(self._get_dragover_style())
                 event.acceptProposedAction()
                 return
@@ -400,16 +388,20 @@ class ImageAttachmentArea(QFrame):
     def dropEvent(self, event: QDropEvent) -> None:
         """Process dropped images."""
         mime = event.mimeData()
-        images = self._process_dropped_content(mime)
+        if mime.hasUrls():
+            if self._queue_file_urls(mime.urls()):
+                event.acceptProposedAction()
+                return
 
-        if self._add_images(images):
+        if mime.hasImage() and self._queue_in_memory_image(mime.imageData()):
             event.acceptProposedAction()
+            return
+
+        if self.image_data:
+            self.setStyleSheet(self._get_active_style())
         else:
-            if self.image_data:
-                self.setStyleSheet(self._get_active_style())
-            else:
-                self.setStyleSheet(self._get_base_style())
-            event.ignore()
+            self.setStyleSheet(self._get_base_style())
+        event.ignore()
 
     def mousePressEvent(self, event) -> None:
         """Open file picker on left-click for click-to-browse behavior."""
@@ -433,79 +425,68 @@ class ImageAttachmentArea(QFrame):
         if not file_paths:
             return
 
-        images = []
+        queued = False
         for file_path in file_paths:
             if not file_path:
                 continue
-            payload = self._create_payload_from_url(Path(file_path))
-            if payload:
-                images.append(payload)
-        self._add_images(images)
+            queued = self._queue_file_path(file_path) or queued
+        if not queued:
+            logger.debug("No selected images were eligible for preparation")
 
     def _add_images(self, images: List[ImageAttachmentPayload]) -> bool:
         """Add processed image payloads and refresh widget state."""
         if not images:
             return False
-        available = max(0, MAX_IMAGE_ATTACHMENTS - len(self.image_data))
-        accepted = images[:available]
-        for rejected in images[available:]:
-            rejected_path = rejected.temp_path
-            if rejected_path:
-                Path(rejected_path).unlink(missing_ok=True)
-                self._temp_paths.discard(rejected_path)
-            self._known_sources.discard(rejected.source_path)
+        accepted = self._attachments.add(images)
         if not accepted:
             logger.warning("Image attachment limit (%d) reached", MAX_IMAGE_ATTACHMENTS)
             return False
         if len(accepted) < len(images):
             logger.warning("Only %d images are allowed; ignored %d", MAX_IMAGE_ATTACHMENTS, len(images) - len(accepted))
-        self.image_data.extend(accepted)
         self.setStyleSheet(self._get_active_style())
         self._update_active_state()
         self.images_changed.emit(True)
         return True
 
-    def _process_dropped_content(self, mime) -> List[ImageAttachmentPayload]:
-        """Extract images from dropped content.
-
-        Args:
-            mime: The MIME data from the drop event.
-
-        Returns:
-            List of image payloads.
-        """
-        # Try file URLs first
-        if mime.hasUrls():
-            images = self._process_file_urls(mime.urls())
-            if images:
-                return images
-
-        # Fall back to in-memory image
-        if mime.hasImage():
-            image = self._process_in_memory_image(mime.imageData())
-            if image:
-                return [image]
-
-        return []
-
-    def _process_file_urls(self, urls) -> List[ImageAttachmentPayload]:
-        """Process dropped file URLs.
+    def _queue_file_urls(self, urls) -> bool:
+        """Queue dropped file URLs for validation and snapshotting.
 
         Args:
             urls: List of QUrl objects.
 
         Returns:
-            List of image payloads.
+            True when at least one path was queued.
         """
-        images = []
+        queued = False
         for url in urls:
-            payload = self._create_payload_from_url(url)
-            if payload:
-                images.append(payload)
-        return images
+            queued = self._queue_file_path(url.toLocalFile()) or queued
+        return queued
 
-    def _create_payload_from_url(self, source) -> Optional[ImageAttachmentPayload]:
-        """Create image payload from file URL or local path.
+    def _queue_file_path(self, file_path: str) -> bool:
+        """Snapshot one local image on the attachment worker."""
+        if not self._has_supported_image_extension(file_path) or not os.path.exists(file_path):
+            return False
+        canonical = str(Path(file_path).resolve())
+        if (
+            self._attachments.contains_source(canonical)
+            or canonical in self._pending_sources
+            or self._attachments.remaining_capacity <= self._pending_images
+        ):
+            return False
+
+        self._pending_sources.add(canonical)
+        self._begin_preparation()
+        future = self._image_executor.submit(self._create_payload_from_url, canonical)
+        future.add_done_callback(
+            lambda completed, token=self._attachment_generation, source=canonical: (
+                self._publish_attachment_result(token, source, completed)
+            )
+        )
+        return True
+
+    @classmethod
+    def _create_payload_from_url(cls, source) -> Optional[ImageAttachmentPayload]:
+        """Validate and snapshot a file without touching widget state.
 
         Args:
             source: QUrl for the file or path-like object.
@@ -514,21 +495,17 @@ class ImageAttachmentArea(QFrame):
             ImageAttachmentPayload or None.
         """
         file_path = source.toLocalFile() if hasattr(source, "toLocalFile") else str(source)
-        if not self._is_supported_image(file_path):
+        if not cls._has_supported_image_extension(file_path):
             return None
         if not os.path.exists(file_path):
             logger.warning("Dropped file does not exist: %s", Path(file_path).name)
             return None
 
         canonical = str(Path(file_path).resolve())
-        if canonical in self._known_sources:
-            return None  # Duplicate
 
         try:
             validated = validate_image_file(canonical)
-            temp_path = self._copy_to_temp(canonical)
-            self._known_sources.add(canonical)
-            self._temp_paths.add(temp_path)
+            temp_path = cls._copy_to_temp(canonical)
             return ImageAttachmentPayload(
                 source_path=canonical,
                 mime_type=validated.mime_type,
@@ -538,53 +515,125 @@ class ImageAttachmentArea(QFrame):
             logger.error("Error preparing dropped file '%s': %s", Path(file_path).name, e)
             return None
 
-    def _process_in_memory_image(self, image_data) -> Optional[ImageAttachmentPayload]:
-        """Convert in-memory image data to file-backed payload.
+    def _queue_in_memory_image(self, image_data) -> bool:
+        """Queue an in-memory image without encoding pixels on the Qt thread."""
+        image = self._extract_qimage(image_data)
+        if image is None or image.isNull():
+            return False
+        if image.width() * image.height() > MAX_IMAGE_PIXELS:
+            logger.error("In-memory image exceeds the %s-pixel limit", f"{MAX_IMAGE_PIXELS:,}")
+            return False
+        if self._attachments.remaining_capacity <= self._pending_images:
+            logger.warning("Image attachment limit (%d) reached", MAX_IMAGE_ATTACHMENTS)
+            return False
 
-        Args:
-            image_data: Image data from MIME.
+        generation = self._attachment_generation
+        self._begin_preparation()
 
-        Returns:
-            ImageAttachmentPayload or None.
-        """
-        pixmap = self._extract_pixmap(image_data)
-        if pixmap is None or pixmap.isNull():
-            return None
+        future = self._image_executor.submit(self._encode_in_memory_image, QImage(image))
+        future.add_done_callback(
+            lambda completed, token=generation: self._publish_attachment_result(
+                token,
+                None,
+                completed,
+            )
+        )
+        return True
 
-        temp_path = None
+    def _begin_preparation(self) -> None:
+        """Enter the shared pending state for file and in-memory work."""
+        self._pending_images += 1
+        self.processing_changed.emit(True)
+        self.section_label.setText("PREPARING IMAGE")
+        self.primary_label.setText("Preparing attachment…")
+        self.secondary_label.setText("This runs in the background")
+
+    @staticmethod
+    def _encode_in_memory_image(image: QImage) -> ImageAttachmentPayload:
+        """Encode and validate one image in a worker-owned temporary file."""
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".png")
+        os.close(temp_fd)
         try:
-            if pixmap.width() * pixmap.height() > MAX_IMAGE_PIXELS:
-                raise ValueError(f"image exceeds the {MAX_IMAGE_PIXELS:,}-pixel limit")
-            temp_path = self._save_pixmap_to_temp(pixmap)
+            if not image.save(temp_path, "PNG"):
+                raise ValueError("Qt could not encode the dropped image as PNG")
             validated = validate_image_file(temp_path)
-            self._temp_paths.add(temp_path)
-            self._known_sources.add(temp_path)
             return ImageAttachmentPayload(
                 source_path=temp_path,
                 mime_type=validated.mime_type,
-                temp_path=temp_path
+                temp_path=temp_path,
             )
-        except Exception as e:
-            logger.error("Error processing in-memory image: %s", e)
-            if temp_path:
-                Path(temp_path).unlink(missing_ok=True)
-            return None
+        except Exception:
+            Path(temp_path).unlink(missing_ok=True)
+            raise
 
-    def _extract_pixmap(self, image_data) -> Optional[QPixmap]:
-        """Extract QPixmap from various image data formats.
+    def _publish_attachment_result(
+        self,
+        generation: int,
+        source: Optional[str],
+        future: Future,
+    ) -> None:
+        """Cross the worker/Qt boundary with a value, never widget mutation."""
+        try:
+            payload = future.result()
+            result = (generation, source, payload, None)
+        except CancelledError:
+            result = (generation, source, None, "cancelled")
+        except Exception as exc:
+            result = (generation, source, None, str(exc))
+        self._attachment_ready.emit(result)
+
+    def _finish_attachment(self, result: object) -> None:
+        """Adopt a worker-created payload or delete it when the request is stale."""
+        generation, source, payload, error = result
+        if generation != self._attachment_generation or self._closing:
+            if payload is not None:
+                self._attachments.dispose_unowned(payload)
+            return
+
+        self._pending_images = max(0, self._pending_images - 1)
+        if source is not None:
+            self._pending_sources.discard(source)
+        self.processing_changed.emit(self._pending_images > 0)
+        if error is not None:
+            if error != "cancelled":
+                logger.error("Error processing in-memory image: %s", error)
+            if self.image_data:
+                self._update_active_state()
+            else:
+                self._update_empty_state()
+            return
+
+        if payload is None:
+            if self.image_data:
+                self._update_active_state()
+            else:
+                self._update_empty_state()
+            return
+        self._add_images([payload])
+
+    @property
+    def image_data(self):
+        """Immutable attachment snapshot exposed for legacy UI callers."""
+        return self._attachments.payloads
+
+    @property
+    def has_pending_images(self) -> bool:
+        """Whether background attachment preparation is still in progress."""
+        return self._pending_images > 0
+
+    def _extract_qimage(self, image_data) -> Optional[QImage]:
+        """Extract a reentrant QImage from supported MIME payload shapes.
 
         Args:
             image_data: Image data in various formats.
 
         Returns:
-            QPixmap or None.
+            QImage or None.
         """
-        from PyQt6.QtGui import QImage, QPixmap
-
         if isinstance(image_data, QImage):
-            return QPixmap.fromImage(image_data)
-        if isinstance(image_data, QPixmap):
             return image_data
+        if isinstance(image_data, QPixmap):
+            return image_data.toImage()
 
         # Handle QByteArray/bytes payloads
         raw_bytes = None
@@ -599,57 +648,23 @@ class ImageAttachmentArea(QFrame):
         elif hasattr(image_data, "toImage"):
             maybe_image = image_data.toImage()
             if isinstance(maybe_image, QImage) and not maybe_image.isNull():
-                return QPixmap.fromImage(maybe_image)
+                return maybe_image
 
         if raw_bytes:
             qimage = QImage.fromData(raw_bytes)
             if not qimage.isNull():
-                return QPixmap.fromImage(qimage)
+                return qimage
 
         return None
 
-    def _save_pixmap_to_temp(self, pixmap: QPixmap) -> str:
-        """Save a pixmap to a temporary file.
-
-        Args:
-            pixmap: QPixmap to save.
-
-        Returns:
-            Path to the temporary file.
-        """
-        from PyQt6.QtCore import QBuffer
-
-        buffer = QBuffer()
-        buffer.open(QBuffer.OpenModeFlag.WriteOnly)
-        pixmap.save(buffer, "PNG")
-        bdata = buffer.data()
-
-        temp_fd, temp_path = tempfile.mkstemp(suffix=".png")
-        with os.fdopen(temp_fd, 'wb') as f:
-            f.write(bytes(bdata))
-        buffer.close()
-
-        return temp_path
-
-    def _is_supported_image(self, file_path: str) -> bool:
-        """Check if the file is a supported image format.
-
-        Args:
-            file_path: Path to the file.
-
-        Returns:
-            True if supported.
-        """
+    @staticmethod
+    def _has_supported_image_extension(file_path: str) -> bool:
+        """Perform the cheap format-hint check used during drag interaction."""
         suffix = Path(file_path).suffix.lower()
-        if not suffix or suffix not in SUPPORTED_IMAGE_EXTENSIONS:
-            return False
-        try:
-            validate_image_file(file_path)
-            return True
-        except Exception:
-            return False
+        return bool(suffix and suffix in SUPPORTED_IMAGE_EXTENSIONS)
 
-    def _copy_to_temp(self, source_path: str) -> str:
+    @staticmethod
+    def _copy_to_temp(source_path: str) -> str:
         """Copy the file to a managed temporary location.
 
         Args:
@@ -664,9 +679,6 @@ class ImageAttachmentArea(QFrame):
             with os.fdopen(temp_fd, "wb") as dest, open(source_path, "rb") as src:
                 shutil.copyfileobj(src, dest)
         except Exception:
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            finally:
-                self._temp_paths.discard(temp_path)
+            Path(temp_path).unlink(missing_ok=True)
             raise
         return temp_path

@@ -4,11 +4,10 @@ import copy
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
 
 import pytz
-from dateutil import parser
 from icalendar import Calendar, Event, vText, Alarm
 
 from eventcalendar.config.constants import (
@@ -16,33 +15,11 @@ from eventcalendar.config.constants import (
     ICS_VERSION,
     ICS_CALSCALE,
     DEFAULT_REMINDER_MINUTES,
-    DEFAULT_EVENT_TITLE,
-)
-from eventcalendar.core.timezone_utils import (
-    normalize_time_string,
-    resolve_timezone,
-    attach_timezone_with_warnings,
-    extract_timezone_from_time_string,
 )
 from eventcalendar.core.event_model import CalendarEvent
+from eventcalendar.core.temporal_resolution import ResolvedEventWindow, resolve_event_window
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ICSBuildResult:
-    """Result of building an ICS event."""
-    success: bool
-    ics_content: Optional[str] = None
-    warning: Optional[str] = None
-
-
-@dataclass
-class DateTimeResult:
-    """Result of parsing event date/time."""
-    start_utc: datetime
-    end_utc: datetime
-    warning: Optional[str] = None
 
 
 @dataclass
@@ -50,23 +27,28 @@ class ICSBatchResult:
     """Structured result for a multi-event build."""
 
     ics_strings: List[str]
-    created_events: List[Dict]
+    created_events: List[dict]
     skipped_events: List[str]
     warnings: List[str]
 
 
-# Required fields for event validation. "uid" and "timezone" are not listed:
-# both are defaulted during ICS creation, so their absence is not fatal.
-REQUIRED_EVENT_FIELDS = {"title", "start_time", "end_time", "date"}
-ALL_DAY_REQUIRED_FIELDS = {"title", "date"}
+@dataclass
+class ICSMergedResult:
+    """A directly assembled calendar plus partial-success diagnostics."""
+
+    ics_content: Optional[str]
+    created_events: List[dict]
+    skipped_events: List[str]
+    warnings: List[str]
 
 
-def _is_all_day(event_dict: Dict) -> bool:
-    """Interpret the optional all_day flag, tolerating LLM string booleans."""
-    value = event_dict.get("all_day", False)
-    if isinstance(value, str):
-        return value.strip().lower() in {"true", "yes", "1"}
-    return bool(value)
+@dataclass
+class _ComponentBuildResult:
+    """Internal typed component result used by both public build paths."""
+
+    event: Optional[CalendarEvent]
+    component: Optional[Event]
+    warning: Optional[str] = None
 
 
 def build_ics_from_events(events: list) -> Tuple[List[str], List[str]]:
@@ -83,10 +65,10 @@ def build_ics_from_events(events: list) -> Tuple[List[str], List[str]]:
 
 
 def build_ics_batch(events) -> ICSBatchResult:
-    """Validate and build each event without allowing one bad item to crash a batch."""
+    """Build individual ICS documents while preserving the public legacy API."""
     normalized = _normalize_events_input(events)
     ics_strings: List[str] = []
-    created_events: List[Dict] = []
+    created_events: List[dict] = []
     skipped_events: List[str] = []
     warnings: List[str] = []
 
@@ -94,293 +76,111 @@ def build_ics_batch(events) -> ICSBatchResult:
         return ICSBatchResult([], [], ["Event payload must be an object or a list of objects."], [])
 
     for index, raw_event in enumerate(normalized):
-        if not isinstance(raw_event, dict):
-            skipped_events.append(
-                f"Skipping event {index + 1} - expected an object, got {type(raw_event).__name__}."
-            )
-            continue
-        try:
-            event_dict = CalendarEvent.from_dict(raw_event).to_dict()
-        except Exception as exc:
-            title = raw_event.get("title") or f"Event {index + 1}"
-            skipped_events.append(f"Skipping '{title}' - {exc}")
+        result = _build_event_component(raw_event, index)
+        if result.component is None or result.event is None:
+            if result.warning:
+                skipped_events.append(result.warning)
             continue
 
-        result = _build_single_event_ics(event_dict, index)
-        if result.success and result.ics_content is not None:
-            ics_strings.append(result.ics_content)
-            created_events.append(event_dict)
-            if result.warning:
-                warnings.append(result.warning)
-        elif result.warning:
-            skipped_events.append(result.warning)
+        try:
+            calendar = _create_ics_calendar()
+            calendar.add_component(result.component)
+            ics_strings.append(_format_ics_output(calendar))
+        except Exception as exc:
+            skipped_events.append(_build_error_message(index, result.event.title, exc))
+            continue
+
+        created_events.append(result.event.to_dict())
+        if result.warning:
+            warnings.append(result.warning)
 
     return ICSBatchResult(ics_strings, created_events, skipped_events, warnings)
 
 
-def _normalize_events_input(events) -> Optional[List]:
-    """Ensure events is a list of dicts.
+def build_merged_ics(events) -> ICSMergedResult:
+    """Build one calendar directly, avoiding serialize/parse/deep-copy churn."""
+    normalized = _normalize_events_input(events)
+    if normalized is None:
+        return ICSMergedResult(
+            None,
+            [],
+            ["Event payload must be an object or a list of objects."],
+            [],
+        )
+
+    calendar = _create_ics_calendar()
+    created_events: List[dict] = []
+    skipped_events: List[str] = []
+    warnings: List[str] = []
+
+    for index, raw_event in enumerate(normalized):
+        result = _build_event_component(raw_event, index)
+        if result.component is None or result.event is None:
+            if result.warning:
+                skipped_events.append(result.warning)
+            continue
+
+        # The historical UI merge path assigns fresh import UIDs. Keep that
+        # behavior here while the public single-document builder preserves its UID.
+        result.component["UID"] = f"{uuid.uuid4()}@nl-calendar"
+        calendar.add_component(result.component)
+        created_events.append(result.event.to_dict())
+        if result.warning:
+            warnings.append(result.warning)
+
+    content = _format_ics_output(calendar) if created_events else None
+    return ICSMergedResult(content, created_events, skipped_events, warnings)
+
+
+def _normalize_events_input(events) -> Optional[List[object]]:
+    """Normalize the compatibility input shape without validating twice.
 
     Args:
         events: Input that should be a list of event dicts.
 
     Returns:
-        Normalized list of event dictionaries.
+        Normalized list of event mappings or already-validated models.
     """
-    if isinstance(events, dict):
+    if isinstance(events, (dict, CalendarEvent)):
         return [events]
+    if isinstance(events, tuple):
+        return list(events)
     if not isinstance(events, list):
         logger.error("Expected a list of events, but got %s", type(events))
         return None
     return events
 
 
-def _build_single_event_ics(event_dict: Dict, index: int) -> ICSBuildResult:
-    """Build ICS for a single event.
+def _build_event_component(raw_event: object, index: int) -> _ComponentBuildResult:
+    """Lower one compatibility input into a typed VEVENT component."""
+    if not isinstance(raw_event, (dict, CalendarEvent)):
+        return _ComponentBuildResult(
+            None,
+            None,
+            f"Skipping event {index + 1} - expected an object, got {type(raw_event).__name__}.",
+        )
 
-    Args:
-        event_dict: Dictionary containing event data.
-        index: Index of the event in the list (for error messages).
+    if isinstance(raw_event, CalendarEvent):
+        event = raw_event
+    else:
+        try:
+            event = CalendarEvent.from_dict(raw_event)
+        except Exception as exc:
+            title = raw_event.get("title") or f"Event {index + 1}"
+            return _ComponentBuildResult(None, None, f"Skipping '{title}' - {exc}")
 
-    Returns:
-        ICSBuildResult with success status, content, and optional warning.
-    """
     try:
-        # Validate required fields
-        validation_warning = _validate_event_fields(event_dict, index)
-        if validation_warning:
-            return ICSBuildResult(success=False, warning=validation_warning)
-
-        # Parse the event window: whole dates for all-day events, otherwise
-        # timezone-resolved UTC datetimes.
-        if _is_all_day(event_dict):
-            start, end = _parse_all_day_dates(event_dict)
-            warning = None
-            all_day = True
-        else:
-            dt_result = _parse_event_datetime(event_dict)
-            start, end = dt_result.start_utc, dt_result.end_utc
-            warning = dt_result.warning
-            all_day = False
-
-        # Build the ICS calendar object
-        cal = _create_ics_calendar()
-        event = _create_ics_event(event_dict, start, end, all_day=all_day)
-        cal.add_component(event)
-
-        ics_content = _format_ics_output(cal)
-        return ICSBuildResult(
-            success=True,
-            ics_content=ics_content,
-            warning=warning
-        )
-
-    except Exception as e:
-        event_title = event_dict.get('title', 'Unknown Title')
-        error_msg = f"Error building ICS for event {index + 1} ({event_title}): {e}"
-        logger.error(error_msg)
-        return ICSBuildResult(success=False, warning=error_msg)
+        window = resolve_event_window(event)
+        component = _create_ics_event(event, window)
+        return _ComponentBuildResult(event, component, window.warning)
+    except Exception as exc:
+        message = _build_error_message(index, event.title, exc)
+        logger.error(message)
+        return _ComponentBuildResult(None, None, message)
 
 
-def _validate_event_fields(event_dict: Dict, index: int) -> Optional[str]:
-    """Validate that required fields are present.
-
-    Args:
-        event_dict: Dictionary containing event data.
-        index: Index of the event for error messages.
-
-    Returns:
-        Warning message if validation fails, None otherwise.
-    """
-    required = ALL_DAY_REQUIRED_FIELDS if _is_all_day(event_dict) else REQUIRED_EVENT_FIELDS
-    missing_keys = required - set(event_dict.keys())
-    if missing_keys:
-        event_title = event_dict.get('title', f'Event {index + 1}')
-        warning_msg = f"Skipping '{event_title}' - missing required fields: {missing_keys}"
-        logger.warning(warning_msg)
-        return warning_msg
-    return None
-
-
-def _parse_all_day_dates(event_dict: Dict) -> Tuple[date, date]:
-    """Parse the date range for an all-day event.
-
-    Args:
-        event_dict: Dictionary containing event data.
-
-    Returns:
-        Tuple of (start_date, end_date_exclusive). Per RFC 5545, DTEND for
-        all-day events is non-inclusive: the day AFTER the last event day.
-
-    Raises:
-        ValueError: If the end date is before the start date.
-    """
-    start_day = date.fromisoformat(event_dict["date"])
-    end_date_raw = event_dict.get("end_date")
-    last_day = date.fromisoformat(end_date_raw) if end_date_raw else start_day
-    if last_day < start_day:
-        raise ValueError(
-            f"All-day end date ({last_day.isoformat()}) is before start date "
-            f"({start_day.isoformat()})."
-        )
-    return start_day, last_day + timedelta(days=1)
-
-
-def _parse_event_datetime(event_dict: Dict) -> DateTimeResult:
-    """Parse and resolve event date/time with timezone.
-
-    Args:
-        event_dict: Dictionary containing event data.
-
-    Returns:
-        DateTimeResult with UTC datetimes and optional warning.
-
-    Raises:
-        Exception: If date/time parsing fails.
-    """
-    try:
-        warnings: List[str] = []
-
-        # Parse the date first
-        event_date = date.fromisoformat(event_dict["date"])
-        end_date_raw = event_dict.get("end_date") or event_dict.get("date")
-        end_date = date.fromisoformat(end_date_raw)
-
-        # Parse start and end times
-        start_time_str_raw = normalize_time_string(event_dict["start_time"])
-        end_time_str_raw = normalize_time_string(event_dict["end_time"])
-
-        base_tz_str = event_dict.get("timezone", "local") or "local"
-        start_tz_str = event_dict.get("start_timezone") or base_tz_str
-        explicit_end_timezone = bool(event_dict.get("end_timezone"))
-        end_tz_str = event_dict.get("end_timezone") or start_tz_str
-
-        # If the LLM embedded timezone in time strings, prefer that.
-        start_time_str, start_tz_from_time = extract_timezone_from_time_string(start_time_str_raw)
-        end_time_str, end_tz_from_time = extract_timezone_from_time_string(end_time_str_raw)
-        if start_tz_from_time:
-            start_tz_str = start_tz_from_time
-        if end_tz_from_time:
-            end_tz_str = end_tz_from_time
-        elif not explicit_end_timezone:
-            # An embedded start zone becomes the event's effective zone unless
-            # the user explicitly supplied a different end zone.
-            end_tz_str = start_tz_str
-
-        # Resolve start/end timezones separately (supports travel "timezone jumps")
-        event_title = event_dict.get("title")
-        start_tz, start_tz_warning = resolve_timezone(str(start_tz_str), event_title)
-        end_tz, end_tz_warning = resolve_timezone(str(end_tz_str), event_title)
-        if start_tz_warning:
-            warnings.append(f"Start time: {start_tz_warning}")
-        if end_tz_warning and end_tz_warning != start_tz_warning:
-            warnings.append(f"End time: {end_tz_warning}")
-
-        # Parse times and combine with date
-        start_time = parser.parse(start_time_str).time()
-        end_time = parser.parse(end_time_str).time()
-
-        # Combine date and time (still naive at this point)
-        start_dt_naive = datetime.combine(event_date, start_time)
-        end_dt_naive = datetime.combine(end_date, end_time)
-
-        # Attach timezone
-        start_dt, start_dst_warning = attach_timezone_with_warnings(start_tz, start_dt_naive)
-        end_dt, end_dst_warning = attach_timezone_with_warnings(end_tz, end_dt_naive)
-        if start_dst_warning:
-            warnings.append(f"Start time: {start_dst_warning}")
-        if end_dst_warning:
-            warnings.append(f"End time: {end_dst_warning}")
-
-        # Convert to UTC for storage
-        start_dt_utc = start_dt.astimezone(pytz.utc)
-        end_dt_utc = end_dt.astimezone(pytz.utc)
-
-        # If end time is not after start, assume it crosses midnight (or the end date was omitted).
-        if end_dt_utc <= start_dt_utc:
-            explicit_end_date = "end_date" in event_dict and bool(event_dict.get("end_date"))
-            if explicit_end_date:
-                raise ValueError(
-                    f"End time ({end_dt_utc.isoformat()}) is not after start time "
-                    f"({start_dt_utc.isoformat()}) after timezone conversion."
-                )
-
-            def tz_key(tzobj) -> str:
-                return str(getattr(tzobj, "zone", getattr(tzobj, "key", str(tzobj))))
-
-            naive_duration = end_dt_naive - start_dt_naive
-
-            same_timezone = tz_key(start_tz) == tz_key(end_tz)
-
-            # Zero-duration input in one timezone: the LLM echoed the start time
-            # (only a start time was stated). Assume a 1-hour event rather than
-            # rolling the end date forward into a full 24-hour block.
-            if naive_duration == timedelta(0) and same_timezone:
-                candidate_end_dt = start_dt + timedelta(hours=1)
-                if hasattr(end_tz, "normalize"):
-                    candidate_end_dt = end_tz.normalize(candidate_end_dt)
-                end_dt = candidate_end_dt
-                end_dt_utc = candidate_end_dt.astimezone(pytz.utc)
-                warnings.append("End time equals start time; assumed a 1-hour duration.")
-
-            # DST edge cases can make an end time appear to be <= start time even when the
-            # user provided a positive wall-time duration (e.g. 02:30–03:30 on spring-forward).
-            # In that case, preserve the naive duration rather than rolling the end date.
-            if naive_duration > timedelta(0) and same_timezone:
-                candidate_end_dt = start_dt + naive_duration
-                if hasattr(end_tz, "normalize"):
-                    candidate_end_dt = end_tz.normalize(candidate_end_dt)
-                candidate_end_utc = candidate_end_dt.astimezone(pytz.utc)
-                if candidate_end_utc > start_dt_utc:
-                    end_dt = candidate_end_dt
-                    end_dt_utc = candidate_end_utc
-                    warnings.append(
-                        "End time was not after start after DST/timezone resolution; "
-                        "preserved the original duration instead of rolling the end date."
-                    )
-                else:
-                    # Fall back to rolling the end date.
-                    pass
-
-            if end_dt_utc <= start_dt_utc:
-                adjusted = False
-                for days in (1, 2):
-                    candidate_end_naive = end_dt_naive + timedelta(days=days)
-                    candidate_end_dt, candidate_dst_warning = attach_timezone_with_warnings(
-                        end_tz,
-                        candidate_end_naive,
-                    )
-                    candidate_end_utc = candidate_end_dt.astimezone(pytz.utc)
-                    if candidate_end_utc > start_dt_utc:
-                        end_dt = candidate_end_dt
-                        end_dt_utc = candidate_end_utc
-                        adjusted = True
-                        warnings.append(
-                            "End time occurred before start after timezone conversion; "
-                            f"assumed the end date is {candidate_end_naive.date().isoformat()}."
-                        )
-                        if candidate_dst_warning:
-                            warnings.append(f"End time: {candidate_dst_warning}")
-                        break
-
-                if not adjusted:
-                    raise ValueError(
-                        f"End time ({end_dt_utc.isoformat()}) is not after start time "
-                        f"({start_dt_utc.isoformat()}) after timezone conversion."
-                    )
-
-        return DateTimeResult(
-            start_utc=start_dt_utc,
-            end_utc=end_dt_utc,
-            warning="\n".join(warnings) if warnings else None,
-        )
-    except Exception as dt_err:
-        event_title = event_dict.get('title', 'Unknown')
-        logger.warning(
-            "Skipping event '%s' due to date/time parsing error: %s",
-            event_title, dt_err
-        )
-        raise
+def _build_error_message(index: int, title: str, error: Exception) -> str:
+    return f"Error building ICS for event {index + 1} ({title}): {error}"
 
 
 def _create_ics_calendar() -> Calendar:
@@ -396,50 +196,43 @@ def _create_ics_calendar() -> Calendar:
     return cal
 
 
-def _create_ics_event(event_dict: Dict, start, end, all_day: bool = False) -> Event:
+def _create_ics_event(event: CalendarEvent, window: ResolvedEventWindow) -> Event:
     """Create an ICS event component.
 
     Args:
-        event_dict: Dictionary containing event data.
-        start: Start as a UTC datetime, or a date for all-day events.
-        end: End as a UTC datetime, or the exclusive end date for all-day events.
-        all_day: Whether this is an all-day (VALUE=DATE) event.
+        event: Validated source event.
+        window: Resolved date or UTC datetime boundaries.
 
     Returns:
         An Event component ready to add to a calendar.
     """
     ve = Event()
 
-    # Ensure UID is present and reasonably unique
-    uid = event_dict.get("uid") or str(uuid.uuid4())
-    ve.add("UID", uid)
+    ve.add("UID", event.uid)
 
     # Use current UTC time for DTSTAMP
     ve.add("DTSTAMP", datetime.now(pytz.utc))
 
     # Add start and end. icalendar serializes date objects as VALUE=DATE.
-    ve.add("DTSTART", start)
-    ve.add("DTEND", end)
+    ve.add("DTSTART", window.start)
+    ve.add("DTEND", window.end)
 
     # Add summary (title)
-    title = event_dict.get("title", DEFAULT_EVENT_TITLE)
-    ve.add("SUMMARY", vText(str(title)))
+    ve.add("SUMMARY", vText(event.title))
 
     # Add optional location
-    location = event_dict.get("location")
-    if location:
-        ve.add("LOCATION", vText(str(location)))
+    if event.location:
+        ve.add("LOCATION", vText(event.location))
 
     # Add optional description
-    description = event_dict.get("description")
-    if description:
-        ve.add("DESCRIPTION", vText(str(description)))
+    if event.description:
+        ve.add("DESCRIPTION", vText(event.description))
 
     # Add a reminder alarm
     alarm = Alarm()
     alarm.add("ACTION", "DISPLAY")
     alarm.add("DESCRIPTION", "Reminder")
-    if all_day:
+    if window.all_day:
         # All-day DTSTART is midnight; fire at 09:00 on the first day,
         # matching the system calendar's default alert for all-day events.
         alarm.add("TRIGGER", timedelta(hours=9))

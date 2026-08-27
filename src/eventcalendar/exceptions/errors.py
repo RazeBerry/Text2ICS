@@ -59,3 +59,14 @@ class RetryExhaustedError(CalendarAPIError):
         if last_error:
             message += f": {last_error}"
         super().__init__(message)
+
+
+class RequestDeadlineExceeded(CalendarAPIError):
+    """The submission exhausted its end-to-end latency budget."""
+
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+        super().__init__(
+            f"Request timed out after {seconds:.0f} seconds. "
+            "Try fewer attachments or check your connection."
+        )

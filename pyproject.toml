@@ -66,15 +66,19 @@ addopts = "-v"
 ignore_decorators = ["@pytest.fixture"]
 ignore_names = [
     "paintEvent",
+    "sizeHint",
     "dragEnterEvent",
     "dropEvent",
     "qt_app",
     "create_calendar_event",
+    "upload_to_gemini",
+    "is_api_key_error",
     "from_dict",
     "to_dict",
     "__getattr__",
     "start_timezone",
     "end_timezone",
+    "SynchronousNetworkRuntime",
 ]
 
 [tool.ruff.lint]

@@ -20,8 +20,6 @@ def main():
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtGui import QIcon
     from eventcalendar.ui.main_window import NLCalendarCreator
-    from eventcalendar.storage.key_manager import load_api_key
-    from eventcalendar.ui.widgets.api_key_dialog import APIKeySetupDialog
 
     app = QApplication(sys.argv)
     app.setApplicationName("EventCalendarGenerator")
@@ -31,15 +29,9 @@ def main():
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 
-    # Check for API key and show setup if needed
-    api_key = load_api_key()
-    if not api_key:
-        dialog = APIKeySetupDialog()
-        if not dialog.exec():
-            sys.exit(0)
-
-    # Create and show main window
-    window = NLCalendarCreator()
+    # Show the shell first; credential discovery and first-run onboarding are
+    # scheduled by the window after the event loop starts.
+    window = NLCalendarCreator(prompt_for_api_key=True)
     window.show()
 
     sys.exit(app.exec())

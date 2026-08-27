@@ -12,7 +12,8 @@ A PyQt6 desktop application that turns natural-language descriptions and event i
 - Strict time-zone handling, including travel across time zones
 - Content-verified image attachments with count, byte, and pixel limits
 - Rate limiting and retry handling
-- Progress indicators and status updates
+- Phase-specific progress, bounded requests, and user cancellation
+- One-request fast path for ordinary transient image batches
 - Modular code architecture with separation of concerns
 
 ## Requirements
@@ -166,7 +167,19 @@ Use the built-in profiler harness:
 python scripts/profile_performance.py
 # machine-readable output
 python scripts/profile_performance.py --json > profile.json
+# CI-aligned regression budgets
+python scripts/profile_performance.py --iterations 3000 --check --json
+# deterministic request-count, overflow, cleanup, and cancellation profile
+python scripts/profile_network_submission.py --check
 ```
+
+The check combines generous machine-sensitive ceilings with stricter structural
+gates: cold import-to-first-paint, preview parsing, direct-versus-compatibility
+ICS assembly, upload preprocessing, worker-side encoding, queue latency, and Qt
+event-loop heartbeat gaps for 12 MP in-memory drops.
+The network harness uses a deterministic fake transport (no API key or quota)
+to enforce the one-request 0/1/4/8-image path and sub-250 ms active-request
+cancellation boundary.
 
 ## Project Structure
 
@@ -198,7 +211,7 @@ installed code should import from `eventcalendar`.
 
 3. Click "Create Event" 
 4. A combined import will open in your default calendar application for your confirmation
-5. For multiple events or images, you'll see a status indicator showing progress
+5. For multiple events or images, you'll see the active phase and can cancel the request
 
 ## Troubleshooting
 

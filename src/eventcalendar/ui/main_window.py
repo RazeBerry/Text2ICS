@@ -11,19 +11,14 @@ import logging
 import os
 import tempfile
 import threading
-from concurrent.futures import CancelledError, ThreadPoolExecutor, Future
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import (
-    Qt, QTimer, QUrl, pyqtSignal, QPropertyAnimation, QEasingCurve,
-    QSequentialAnimationGroup, QParallelAnimationGroup, pyqtProperty, QPointF
-)
-from PyQt6.QtGui import QCloseEvent, QDesktopServices, QPainter, QColor, QPen
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QCloseEvent, QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QLabel, QMessageBox, QSizePolicy, QFrame,
-    QGraphicsOpacityEffect
 )
 
 from eventcalendar.config.settings import UI_CONFIG
@@ -44,52 +39,14 @@ from eventcalendar.ui.theme.manager import toggle_theme
 from eventcalendar.ui.styles.base import px
 from eventcalendar.ui.styles.manager import StyleManager
 from eventcalendar.ui.styles.button_styles import ButtonStyles
-from eventcalendar.ui.widgets.image_area import ImageAttachmentArea, ImageAttachmentPayload
+from eventcalendar.ui.widgets.image_area import ImageAttachmentArea
 from eventcalendar.ui.widgets.api_key_dialog import APIKeySetupDialog
+from eventcalendar.ui.widgets.progress_overlay import ProcessingOverlay
 from eventcalendar.ui.preview import parse_event_text, format_date_display
 from eventcalendar.ui.error_messages import get_user_friendly_error
+from eventcalendar.ui.event_creation_controller import EventCreationController, JobState
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from eventcalendar.core.api_client import CalendarAPIClient
-
-
-class WaveDot(QWidget):
-    """A single dot widget with animatable vertical offset for wave effect.
-
-    The dot bobs up and down when its offset property is animated,
-    creating a smooth wave motion when multiple dots are staggered.
-    """
-
-    def __init__(self, color: str, size: int = 10, parent=None):
-        super().__init__(parent)
-        self._offset = 0.0
-        self._color = QColor(color)
-        self._size = size
-        # Height allows room for vertical movement
-        self.setFixedSize(size + 4, size * 3)
-
-    @pyqtProperty(float)
-    def offset(self) -> float:
-        return self._offset
-
-    @offset.setter
-    def offset(self, value: float) -> None:
-        self._offset = value
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(self._color)
-        painter.setPen(QPen(Qt.PenStyle.NoPen))
-
-        # Draw circle at horizontal center, vertical center + offset
-        center_x = self.width() / 2
-        center_y = self.height() / 2 + self._offset
-        radius = self._size / 2
-        painter.drawEllipse(QPointF(center_x, center_y), radius, radius)
 
 
 class NLCalendarCreator(QMainWindow):
@@ -99,17 +56,14 @@ class NLCalendarCreator(QMainWindow):
     editorial typography, and generous whitespace.
     """
 
-    # Signals for thread-safe UI updates
-    update_status_signal = pyqtSignal(str)
-    enable_ui_signal = pyqtSignal(bool)
-    clear_input_signal = pyqtSignal()
-    show_progress_signal = pyqtSignal(bool)
-    finalize_events_signal = pyqtSignal(object)
+    # Storage warmup runs outside Qt and crosses back through this signal.
     legacy_storage_signal = pyqtSignal(str)
+    api_key_required_signal = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, *, prompt_for_api_key: bool = False):
         """Initialize the main window."""
         super().__init__()
+        self._prompt_for_api_key = prompt_for_api_key
 
         # Set app-wide default font (Qt stylesheets don't reliably set font-family on macOS)
         set_app_font(QApplication.instance(), "sans", 14)
@@ -128,31 +82,24 @@ class NLCalendarCreator(QMainWindow):
         self.resize(*UI_CONFIG.default_window_size)
 
     def _init_thread_infrastructure(self) -> None:
-        """Initialize thread pool and synchronization primitives."""
-        self._executor = ThreadPoolExecutor(
-            max_workers=UI_CONFIG.executor_max_workers,
-            thread_name_prefix="calendar_worker"
-        )
-        self._active_futures: set = set()
-        self._threads_lock = threading.Lock()
-        self._api_client_lock = threading.Lock()
-        self._cancel_event = threading.Event()
+        """Initialize the one-at-a-time event-creation controller."""
+        self._creation_controller = EventCreationController(self)
 
     def _init_state(self) -> None:
         """Initialize application state."""
-        self.api_client: Optional["CalendarAPIClient"] = None
         self._prefetched_api_key: Optional[str] = None
         self._prefetch_ready = threading.Event()
+        self._credential_lock = threading.Lock()
+        self._credential_generation = 0
         self.style_manager = StyleManager()
         self._preview_title_style_active = ""
         self._preview_title_style_placeholder = ""
         self._preview_style_mode: Optional[str] = None
-        self.overlay: Optional[QWidget] = None
-        self._wave_animation: Optional[QParallelAnimationGroup] = None
-        self._wave_dots: List[WaveDot] = []
-        self._dot_opacities: List[QGraphicsOpacityEffect] = []
+        self.overlay: Optional[ProcessingOverlay] = None
         self._temp_ics_paths: set[str] = set()
         self._closing = False
+        self._ui_enabled = True
+        self._attachments_processing = False
 
     def _init_ui(self) -> None:
         """Build the complete UI tree with editorial layout."""
@@ -449,152 +396,11 @@ class NLCalendarCreator(QMainWindow):
         layout.addLayout(button_layout)
 
     def _setup_overlay(self) -> None:
-        """Set up the processing overlay with warm styling."""
+        """Lazily construct the self-contained processing overlay."""
         if self.overlay is not None:
             return
-
-        self.overlay = QWidget(self.centralWidget())
-        self.overlay.setStyleSheet(f"""
-            QWidget {{
-                background-color: {get_color('surface_overlay')};
-            }}
-        """)
-        self.overlay.hide()
-
-        overlay_layout = QVBoxLayout(self.overlay)
-        overlay_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # Processing card
-        processing_card = QFrame()
-        processing_card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {get_color('surface_elevated')};
-                border-radius: {px(BORDER_RADIUS["lg"])};
-                padding: {px(SPACING_SCALE["lg"])};
-            }}
-        """)
-        card_layout = QVBoxLayout(processing_card)
-        card_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        card_layout.setSpacing(SPACING_SCALE["sm"])
-
-        # Three-dot wave animation container (transparent background)
-        dots_container = QWidget()
-        dots_container.setStyleSheet("background: transparent;")
-        dots_layout = QHBoxLayout(dots_container)
-        dots_layout.setContentsMargins(0, 0, 0, 0)
-        dots_layout.setSpacing(SPACING_SCALE["sm"])
-        dots_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # Create three wave dots with opacity effects for breathing
-        accent_color = get_color('accent')
-        self._wave_dots = []
-        self._dot_opacities = []
-        for _ in range(3):
-            dot = WaveDot(accent_color, size=10)
-            # Add opacity effect for breathing
-            opacity_effect = QGraphicsOpacityEffect()
-            opacity_effect.setOpacity(1.0)
-            dot.setGraphicsEffect(opacity_effect)
-            self._wave_dots.append(dot)
-            self._dot_opacities.append(opacity_effect)
-            dots_layout.addWidget(dot)
-
-        card_layout.addWidget(dots_container)
-
-        # Set up combined wave + breathing animation
-        self._wave_animation = QParallelAnimationGroup()
-        wave_height = 8.0  # Pixels to move up/down
-        wave_duration = 600  # ms for one up-down cycle
-        breath_duration = 1200  # ms for one breath cycle (slower than wave)
-
-        for i, (dot, opacity) in enumerate(zip(self._wave_dots, self._dot_opacities)):
-            phase_delay = i * (wave_duration // 3)
-            dot_group = self._create_dot_animations(
-                dot, opacity, phase_delay, wave_height, wave_duration, breath_duration
-            )
-            self._wave_animation.addAnimation(dot_group)
-
-        self.processing_label = QLabel("Processing...")
-        headline_style = TYPOGRAPHY_SCALE["headline"]
-        self.processing_label.setStyleSheet(f"""
-            QLabel {{
-                font-family: {headline_style["font_family"]};
-                font-size: {px(headline_style["size_px"])};
-                font-weight: {headline_style["weight"]};
-                color: {get_color('text_primary')};
-            }}
-        """)
-        self.processing_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        card_layout.addWidget(self.processing_label)
-
-        overlay_layout.addWidget(processing_card)
-
-    def _create_dot_animations(
-        self, dot: WaveDot, opacity: QGraphicsOpacityEffect,
-        phase_delay: int, wave_height: float,
-        wave_duration: int, breath_duration: int,
-    ) -> QParallelAnimationGroup:
-        """Build parallel wave + breathing animations for a single dot.
-
-        Returns a QParallelAnimationGroup containing phase-delayed wave
-        (vertical offset) and breathing (opacity) animation sequences.
-        """
-        # Wave animation (position)
-        wave_seq = QSequentialAnimationGroup()
-        up_anim = QPropertyAnimation(dot, b"offset")
-        up_anim.setDuration(wave_duration // 2)
-        up_anim.setStartValue(0.0)
-        up_anim.setEndValue(-wave_height)
-        up_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-        down_anim = QPropertyAnimation(dot, b"offset")
-        down_anim.setDuration(wave_duration // 2)
-        down_anim.setStartValue(-wave_height)
-        down_anim.setEndValue(0.0)
-        down_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-        wave_seq.addAnimation(up_anim)
-        wave_seq.addAnimation(down_anim)
-        wave_seq.setLoopCount(-1)
-
-        # Breathing animation (opacity)
-        breath_seq = QSequentialAnimationGroup()
-        fade_out = QPropertyAnimation(opacity, b"opacity")
-        fade_out.setDuration(breath_duration // 2)
-        fade_out.setStartValue(1.0)
-        fade_out.setEndValue(0.4)
-        fade_out.setEasingCurve(QEasingCurve.Type.InOutSine)
-        fade_in = QPropertyAnimation(opacity, b"opacity")
-        fade_in.setDuration(breath_duration // 2)
-        fade_in.setStartValue(0.4)
-        fade_in.setEndValue(1.0)
-        fade_in.setEasingCurve(QEasingCurve.Type.InOutSine)
-        breath_seq.addAnimation(fade_out)
-        breath_seq.addAnimation(fade_in)
-        breath_seq.setLoopCount(-1)
-
-        # Combine with phase offset
-        dot_group = QParallelAnimationGroup()
-
-        wave_wrapper = QSequentialAnimationGroup()
-        if phase_delay > 0:
-            pause = QPropertyAnimation(dot, b"offset")
-            pause.setDuration(phase_delay)
-            pause.setStartValue(0.0)
-            pause.setEndValue(0.0)
-            wave_wrapper.addAnimation(pause)
-        wave_wrapper.addAnimation(wave_seq)
-
-        breath_wrapper = QSequentialAnimationGroup()
-        if phase_delay > 0:
-            breath_pause = QPropertyAnimation(opacity, b"opacity")
-            breath_pause.setDuration(phase_delay)
-            breath_pause.setStartValue(1.0)
-            breath_pause.setEndValue(1.0)
-            breath_wrapper.addAnimation(breath_pause)
-        breath_wrapper.addAnimation(breath_seq)
-
-        dot_group.addAnimation(wave_wrapper)
-        dot_group.addAnimation(breath_wrapper)
-        return dot_group
+        self.overlay = ProcessingOverlay(self.centralWidget())
+        self.overlay.cancel_requested.connect(self._creation_controller.cancel)
 
     def _setup_preview_timer(self) -> None:
         """Set up the debounced preview timer."""
@@ -622,12 +428,14 @@ class NLCalendarCreator(QMainWindow):
 
     def _connect_signals(self) -> None:
         """Wire up all signal/slot connections."""
-        self.update_status_signal.connect(self._update_status)
-        self.enable_ui_signal.connect(self._set_ui_enabled)
-        self.clear_input_signal.connect(self._clear_inputs)
-        self.show_progress_signal.connect(self._show_progress)
-        self.finalize_events_signal.connect(self._finalize_events)
         self.legacy_storage_signal.connect(self._handle_legacy_storage_notice)
+        self.api_key_required_signal.connect(self._prompt_for_missing_api_key)
+        self.image_area.processing_changed.connect(self._on_attachment_processing_changed)
+        self._creation_controller.status_changed.connect(self._update_status)
+        self._creation_controller.completed.connect(self._handle_creation_completed)
+        self._creation_controller.failed.connect(self._handle_creation_failed)
+        self._creation_controller.cancelled.connect(self._handle_creation_cancelled)
+        self._creation_controller.state_changed.connect(self._handle_creation_state)
 
     def _warm_storage_state_async(self) -> None:
         """Warm key storage in background so startup stays responsive."""
@@ -640,12 +448,32 @@ class NLCalendarCreator(QMainWindow):
 
     def _storage_warmup_worker(self) -> None:
         """Background worker for keyring probing and legacy checks."""
+        with self._credential_lock:
+            generation = self._credential_generation
         try:
-            self._prefetched_api_key = load_api_key()
+            loaded_key = load_api_key()
         except Exception:
+            loaded_key = None
             logger.debug("API key prefetch failed during warmup", exc_info=True)
-        finally:
-            self._prefetch_ready.set()
+
+        # Import the relatively heavy Google SDK after first paint, in this
+        # existing background warmup.  Client construction remains credential-
+        # scoped and lazy, but the first Create click avoids a cold import stall.
+        try:
+            from eventcalendar.core import api_client as _api_client  # noqa: F401
+        except Exception:
+            logger.debug("Gemini SDK import warmup failed", exc_info=True)
+
+        with self._credential_lock:
+            if generation == self._credential_generation:
+                self._prefetched_api_key = loaded_key
+                self._prefetch_ready.set()
+                should_prompt = not loaded_key
+            else:
+                should_prompt = False
+
+        if self._prompt_for_api_key and should_prompt and not self._closing:
+            self.api_key_required_signal.emit()
 
         try:
             warning = check_and_warn_legacy_storage()
@@ -653,6 +481,32 @@ class NLCalendarCreator(QMainWindow):
                 self.legacy_storage_signal.emit(warning)
         except Exception:
             logger.debug("Legacy storage check failed during warmup", exc_info=True)
+
+    def _prompt_for_missing_api_key(self) -> None:
+        """Preserve first-run onboarding without blocking the first window paint."""
+        with self._credential_lock:
+            cached_key = self._prefetched_api_key
+        if self._closing or cached_key:
+            return
+        dialog = APIKeySetupDialog(self)
+        if not dialog.exec():
+            self.close()
+            return
+        self._publish_interactive_api_key(load_api_key())
+
+    def _publish_interactive_api_key(self, api_key: Optional[str]) -> None:
+        """Publish a foreground credential and supersede older warmups."""
+        with self._credential_lock:
+            self._credential_generation += 1
+            self._prefetched_api_key = api_key
+            self._prefetch_ready.set()
+
+    def _invalidate_cached_api_key(self) -> None:
+        """Invalidate credentials so an older warmup cannot republish them."""
+        with self._credential_lock:
+            self._credential_generation += 1
+            self._prefetched_api_key = None
+            self._prefetch_ready.clear()
 
     # --- Event Handlers ---
 
@@ -817,11 +671,7 @@ class NLCalendarCreator(QMainWindow):
 
         # Update overlay
         if self.overlay is not None:
-            self.overlay.setStyleSheet(f"""
-                QWidget {{
-                    background-color: {get_color('surface_overlay')};
-                }}
-            """)
+            self.overlay.refresh_theme()
 
     def _clear_inputs(self) -> None:
         """Clear all input fields."""
@@ -832,14 +682,9 @@ class NLCalendarCreator(QMainWindow):
         """Show the settings/API key dialog."""
         dialog = APIKeySetupDialog(self)
         if dialog.exec():
-            # Reload API client with new key
-            with self._api_client_lock:
-                if self.api_client is not None:
-                    self.api_client.close()
-                self.api_client = None
-                self._prefetched_api_key = None
-                self._prefetch_ready.clear()
-                self._warm_storage_state_async()
+            self._creation_controller.reset_client()
+            self._invalidate_cached_api_key()
+            self._warm_storage_state_async()
 
     def _handle_legacy_storage_notice(self, message: str) -> None:
         """Offer removal of a migrated plaintext key without deleting silently."""
@@ -862,7 +707,8 @@ class NLCalendarCreator(QMainWindow):
 
     def _update_status(self, message: str) -> None:
         """Update the status display."""
-        self.processing_label.setText(message)
+        if self.overlay is not None:
+            self.overlay.set_status(message)
 
     def _show_transient_notice(self, message: str, timeout_ms: int = 6000) -> None:
         """Show non-blocking notice in the status bar.
@@ -876,39 +722,44 @@ class NLCalendarCreator(QMainWindow):
 
     def _set_ui_enabled(self, enabled: bool) -> None:
         """Enable or disable UI elements."""
-        self.create_button.setEnabled(enabled)
+        self._ui_enabled = enabled
+        self.create_button.setEnabled(enabled and not self._attachments_processing)
         self.clear_button.setEnabled(enabled)
         self.text_input.setEnabled(enabled)
+        self.settings_button.setEnabled(enabled)
+        self.theme_button.setEnabled(enabled)
+        self.image_area.setEnabled(enabled)
+
+    def _on_attachment_processing_changed(self, processing: bool) -> None:
+        """Keep submission unavailable until worker-owned attachments are durable."""
+        self._attachments_processing = processing
+        self.create_button.setEnabled(self._ui_enabled and not processing)
+        if processing:
+            self._show_transient_notice("Preparing image attachment…", timeout_ms=0)
 
     def _show_progress(self, show: bool) -> None:
         """Show or hide the progress overlay."""
         if show:
             if self.overlay is None:
                 self._setup_overlay()
-            if self.overlay is None or self._wave_animation is None:
+            if self.overlay is None:
                 return
-            self.overlay.setGeometry(self.centralWidget().rect())
-            self.overlay.show()
-            self.overlay.raise_()
-            # Reset dots to starting position and opacity
-            for dot, opacity in zip(self._wave_dots, self._dot_opacities):
-                dot.offset = 0.0
-                opacity.setOpacity(1.0)
-            self._wave_animation.start()
-        else:
-            if self._wave_animation is not None:
-                self._wave_animation.stop()
-            if self.overlay is not None:
-                self.overlay.hide()
+            self.overlay.start()
+        elif self.overlay is not None:
+            self.overlay.stop()
 
     # --- Event Processing ---
 
     def process_event(self) -> None:
         """Process the event creation request."""
+        if self.image_area.has_pending_images:
+            self._show_transient_notice("Please wait for image preparation to finish.")
+            return
         # Ensure an API key is available (client initialization happens in worker thread)
         if not self._ensure_api_client():
             return
-        api_key = self._prefetched_api_key
+        with self._credential_lock:
+            api_key = self._prefetched_api_key
 
         # Get input data
         event_description = self.text_input.toPlainText().strip()
@@ -929,37 +780,36 @@ class NLCalendarCreator(QMainWindow):
                 return
 
         # Disable UI and show progress
-        self._cancel_event.clear()
-        self.enable_ui_signal.emit(False)
-        self.show_progress_signal.emit(True)
+        self._set_ui_enabled(False)
+        self._show_progress(True)
 
-        # Submit to thread pool
+        # Submit to the one-at-a-time controller
         image_payloads = list(self.image_area.image_data)
-        future = self._executor.submit(
-            self._create_event_thread,
-            event_description,
-            image_payloads,
-            api_key,
-        )
-        with self._threads_lock:
-            self._active_futures.add(future)
-        future.add_done_callback(self._on_future_done)
+        try:
+            self._creation_controller.submit(
+                event_description,
+                image_payloads,
+                api_key or "",
+            )
+        except Exception as exc:
+            self._set_ui_enabled(True)
+            self._show_progress(False)
+            self._handle_creation_failed(exc)
 
     def _ensure_api_client(self) -> bool:
         """Ensure an API key is available for event processing."""
         if self._prefetch_ready.is_set():
-            api_key = self._prefetched_api_key
+            with self._credential_lock:
+                api_key = self._prefetched_api_key
         else:
             api_key = load_api_key()
-            self._prefetched_api_key = api_key
-            self._prefetch_ready.set()
+            self._publish_interactive_api_key(api_key)
 
         if not api_key:
             dialog = APIKeySetupDialog(self)
             if dialog.exec():
                 api_key = load_api_key()
-                self._prefetched_api_key = api_key
-                self._prefetch_ready.set()
+                self._publish_interactive_api_key(api_key)
             else:
                 return False
 
@@ -985,60 +835,38 @@ class NLCalendarCreator(QMainWindow):
 
         return True
 
-    def _create_event_thread(
-        self,
-        event_description: str,
-        image_payloads: List[ImageAttachmentPayload],
-        api_key: Optional[str],
-    ) -> None:
-        """Worker thread for event creation."""
-        try:
-            if not api_key:
-                raise ValueError("No API key available for event creation.")
+    def _handle_creation_completed(self, extraction) -> None:
+        """Handle one successful worker result on the Qt thread."""
+        if self._closing:
+            return
+        if extraction.events:
+            self._finalize_events(extraction)
+            return
+        self._update_status("No events found")
+        self._set_ui_enabled(True)
+        self._show_progress(False)
 
-            if self.api_client is None:
-                self.update_status_signal.emit("Initializing AI client...")
-                with self._api_client_lock:
-                    if self.api_client is None:
-                        from eventcalendar.core.api_client import CalendarAPIClient
+    def _handle_creation_failed(self, error: Exception) -> None:
+        """Render one terminal worker error at the controller boundary."""
+        logger.error("Error creating event: %s", error)
+        if self._closing:
+            return
+        self._update_status(get_user_friendly_error(error))
+        self._set_ui_enabled(True)
+        self._show_progress(False)
 
-                        self.api_client = CalendarAPIClient(api_key)
+    def _handle_creation_cancelled(self) -> None:
+        """Restore an immediately usable UI after user cancellation."""
+        if self._closing:
+            return
+        self._update_status("Event creation cancelled.")
+        self._set_ui_enabled(True)
+        self._show_progress(False)
 
-            image_data = [
-                img.materialize(include_base64=False) for img in image_payloads
-            ]
-
-            def status_callback(msg: str) -> None:
-                if not self._closing and not self._cancel_event.is_set():
-                    self.update_status_signal.emit(msg)
-
-            extraction = self.api_client.extract_events(
-                event_description,
-                image_data,
-                status_callback,
-                cancel_event=self._cancel_event,
-            )
-
-            if extraction.events and not self._closing:
-                self.finalize_events_signal.emit(extraction)
-            elif not self._closing:
-                self.update_status_signal.emit("No events found")
-                self.enable_ui_signal.emit(True)
-                self.show_progress_signal.emit(False)
-
-        except CancelledError:
-            logger.debug("Event extraction cancelled")
-        except Exception as e:
-            logger.error("Error creating event: %s", e)
-            if not self._closing:
-                self.update_status_signal.emit(get_user_friendly_error(e))
-                self.enable_ui_signal.emit(True)
-                self.show_progress_signal.emit(False)
-
-    def _on_future_done(self, future: Future) -> None:
-        """Callback when a future completes."""
-        with self._threads_lock:
-            self._active_futures.discard(future)
+    def _handle_creation_state(self, state: JobState) -> None:
+        """Keep UI state derived from the controller's explicit lifecycle."""
+        if state is JobState.IDLE and not self._closing:
+            self._set_ui_enabled(True)
 
     # --- Event Finalization ---
 
@@ -1046,13 +874,15 @@ class NLCalendarCreator(QMainWindow):
         """Finalize events by building ICS and opening calendar."""
         if self._closing:
             return
-        events = extraction.events if hasattr(extraction, "events") else extraction
+        compatible_events = extraction.events if hasattr(extraction, "events") else extraction
+        event_models = tuple(getattr(extraction, "event_models", ()))
+        events = event_models or compatible_events
         extraction_warnings = list(getattr(extraction, "warnings", []))
         try:
-            self.update_status_signal.emit("Creating calendar events...")
+            self._update_status("Creating calendar events...")
             ics_content, created_count, warnings = self._build_merged_ics(events)
             warnings = [*extraction_warnings, *warnings]
-            self._open_in_calendar(ics_content, created_count, len(events), warnings)
+            self._open_in_calendar(ics_content, created_count, len(compatible_events), warnings)
         except Exception as e:
             logger.error("Error finalizing events: %s", e)
             QMessageBox.critical(
@@ -1061,27 +891,27 @@ class NLCalendarCreator(QMainWindow):
                 f"Failed to create calendar event: {get_user_friendly_error(e)}"
             )
         finally:
-            self.enable_ui_signal.emit(True)
-            self.show_progress_signal.emit(False)
+            self._set_ui_enabled(True)
+            self._show_progress(False)
 
-    def _build_merged_ics(self, events: List[Dict]) -> Tuple[str, int, List[str]]:
-        """Build ICS strings and merge them.
+    def _build_merged_ics(self, events) -> Tuple[str, int, List[str]]:
+        """Build one merged calendar from validated models or legacy dictionaries.
 
         Returns:
             Tuple of (merged ICS content, number of events built, warnings).
         """
-        from eventcalendar.core.ics_builder import build_ics_batch, combine_ics_strings
+        from eventcalendar.core.ics_builder import build_merged_ics
 
-        result = build_ics_batch(events)
+        result = build_merged_ics(events)
 
-        if not result.ics_strings:
+        if result.ics_content is None:
             raise ValueError("Failed to create ICS files from event data")
 
         warnings = [*result.skipped_events, *result.warnings]
         if warnings:
             logger.warning("ICS warnings:\n%s", "\n".join(warnings))
 
-        return combine_ics_strings(result.ics_strings), len(result.ics_strings), warnings
+        return result.ics_content, len(result.created_events), warnings
 
     def _open_in_calendar(
         self,
@@ -1181,30 +1011,34 @@ class NLCalendarCreator(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         """Handle window close event."""
         self._closing = True
-        self._cancel_event.set()
-        with self._threads_lock:
-            for future in self._active_futures:
-                cancel = getattr(future, "cancel", None)
-                if cancel is not None:
-                    cancel()
-        self.image_area.reset_state()
-        for temp_path in list(self._temp_ics_paths):
-            try:
-                os.unlink(temp_path)
-            except FileNotFoundError:
-                pass
-            except Exception as exc:
-                logger.warning("Failed to delete temp ICS file %s: %s", temp_path, exc)
-            finally:
-                self._temp_ics_paths.discard(temp_path)
-        with self._api_client_lock:
-            if self.api_client is not None:
+        try:
+            self._creation_controller.close()
+        except Exception:
+            logger.warning("Event-creation controller close failed", exc_info=True)
+        try:
+            self.image_area.shutdown()
+        except Exception:
+            logger.warning("Attachment shutdown failed", exc_info=True)
+        finally:
+            for temp_path in list(self._temp_ics_paths):
                 try:
-                    self.api_client.close()
-                except Exception:
-                    logger.debug("API client close failed", exc_info=True)
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        super().closeEvent(event)
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    logger.warning("Failed to delete temp ICS file %s: %s", temp_path, exc)
+                finally:
+                    self._temp_ics_paths.discard(temp_path)
+            super().closeEvent(event)
+
+    @property
+    def api_client(self):
+        """Compatibility view for legacy tests and source-checkout callers."""
+        return self._creation_controller.client
+
+    @api_client.setter
+    def api_client(self, client) -> None:
+        self._creation_controller.set_client_for_testing(client)
 
     # --- Backward Compatibility ---
 
